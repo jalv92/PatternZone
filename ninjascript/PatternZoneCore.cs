@@ -551,6 +551,12 @@ namespace PatternZoneCore
         public double StopPrice, TargetPrice;    // Enter*: initial bracket. Add*: StopPrice = new AGGREGATE stop.
         public PatternCandidate Pattern;         // Enter* + DrawPattern + DrawRejected
         public FlagInfo Flag;                    // Add* + DrawFlag
+        // The neckline evaluated at the BREAK bar, carried out with the action
+        // because it is in ENGINE index space. The shell counts bars separately
+        // (a Playback rewind rebuilds the engine from bar 0 while NT8's
+        // CurrentBar keeps climbing), so re-evaluating NecklineAt(CurrentBar)
+        // chart-side skews every sloped neckline it draws.
+        public double NecklineAtBreak;
         // DrawRejected: "zone" | "height" | "busy" | "session_cap" | "flag_no_position".
         // The last one is unreachable here by construction (spec §7/rule 8: the
         // flag detector is only ever armed while in position), so no branch
@@ -768,27 +774,27 @@ namespace PatternZoneCore
                 return;
             if (_state != PzState.Flat)
             {
-                actions.Add(Reject(c, "busy"));
+                actions.Add(Reject(c, "busy", neckline));
                 return;
             }
             if (!canTrade)
                 return;                              // lockout / window: the shell already knows why
             if (_trades >= _cfg.MaxTradesPerSession)
             {
-                actions.Add(Reject(c, "session_cap"));
+                actions.Add(Reject(c, "session_cap", neckline));
                 return;
             }
 
             double height = Math.Abs(c.ExtremePrice - neckline);
             if (height < _cfg.MinPatternHeightAtr * atr)
             {
-                actions.Add(Reject(c, "height"));
+                actions.Add(Reject(c, "height", neckline));
                 return;
             }
             double zoneLevel;
             if (!_zones.Permits(c, atr, out zoneLevel))
             {
-                actions.Add(Reject(c, "zone"));
+                actions.Add(Reject(c, "zone", neckline));
                 return;
             }
 
@@ -799,8 +805,9 @@ namespace PatternZoneCore
                 Pattern = c,
                 StopPrice = c.ExtremePrice - dirSign * _cfg.StopBufferAtr * atr,
                 TargetPrice = neckline + dirSign * height * _cfg.TargetMultiple,
+                NecklineAtBreak = neckline,
             });
-            actions.Add(new PzAction { Type = PzActionType.DrawPattern, Pattern = c });
+            actions.Add(new PzAction { Type = PzActionType.DrawPattern, Pattern = c, NecklineAtBreak = neckline });
 
             foreach (PzSwing s in c.Swings)
                 _consumed.Add(SwingKey(s));
@@ -810,9 +817,9 @@ namespace PatternZoneCore
             _state = PzState.AwaitingEntryFill;
         }
 
-        private static PzAction Reject(PatternCandidate c, string reason)
+        private static PzAction Reject(PatternCandidate c, string reason, double neckline)
         {
-            return new PzAction { Type = PzActionType.DrawRejected, Pattern = c, RejectReason = reason };
+            return new PzAction { Type = PzActionType.DrawRejected, Pattern = c, RejectReason = reason, NecklineAtBreak = neckline };
         }
 
         private void UpdateFlags(PzBar bar, double atr, bool canTrade, List<PzAction> actions)

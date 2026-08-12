@@ -254,6 +254,9 @@ namespace PatternZone.Tests
             T.Check(ent.TargetPrice < ent.Pattern.NecklineAt(_bar), "target below neckline");
             T.CheckClose(ent.StopPrice, 111.2, "stop = extreme + StopBufferAtr*atr");
             T.CheckClose(ent.TargetPrice, 89.8, "target = neckline - height*TargetMultiple");
+            // The break-bar neckline rides on the action: the drawing layer must
+            // never re-derive it from its own bar counter (different index space).
+            T.CheckClose(ent.NecklineAtBreak, 100.0, "action carries the neckline at the break bar");
 
             // --- Flag add-on, anchored on the fill (99.4 @ bar 20).
             e.OnEntryFilled(99.4);
@@ -384,6 +387,69 @@ namespace PatternZone.Tests
             third.AddRange(Wander(eCap, 98, 97));
             T.Check(Find(third, PzActionType.EnterShort) != null, "new session re-opens the trade budget");
             T.Check(Rejected(third, "session_cap") == null, "no session_cap after the reset");
+
+            // --- MaxPatternBars expiry. The M arms at bar 17 off a first swing
+            // at bar 6; at MaxPatternBars 20 the budget runs out on bar 27. The
+            // quiet run holds price between the neckline (100.0) and the extreme
+            // (110.2) so nothing resolves it early, and its flat closes confirm
+            // no new swings (tied extremes are rejected).
+            var eExp = Fresh(new PzConfig { SwingStrength = 2, MaxPatternBars = 20 });
+            Wander(eExp, new List<double>(MAt110).GetRange(0, 20).ToArray());
+            var quiet = Wander(eExp, 100, 100, 100, 100, 100, 100, 100);       // bars 20-26
+            T.Check(quiet.Count == 0, "armed candidate sits quiet inside its budget");
+            var late = One(eExp, 100, 101, 98, 99.4);                          // bar 27: would have broken
+            T.Check(late.Count == 0, "expired candidate cannot break");
+
+            // --- Candidate invalidation: a close beyond the extreme in the
+            // failure direction drops the candidate, so the neckline break that
+            // arrives afterwards has nothing left to fire.
+            var eInv = Fresh(new PzConfig { SwingStrength = 2 });
+            Wander(eInv, new List<double>(MAt110).GetRange(0, 20).ToArray());
+            var over = One(eInv, 100.5, 111.0, 100.0, 110.5);                  // close > extreme 110.2
+            T.Check(over.Count == 0, "close beyond the extreme emits nothing");
+            var brkAfter = One(eInv, 110.5, 111.0, 99.0, 99.4);                // a real break, nothing armed
+            T.Check(brkAfter.Count == 0, "invalidated candidate cannot enter");
+
+            // --- MinDistToTargetAtr BLOCKS the add. Same proven pole+flag as the
+            // add test above, but TargetMultiple 0.8 puts the target at 91.84, so
+            // the trigger close 93.2 leaves 1.36 — under MinDistToTargetAtr*atr
+            // (3.0). Everything else about the shape is identical, which is what
+            // makes the missing AddShort attributable to the distance guard.
+            var eNear = Fresh(new PzConfig { SwingStrength = 2, TargetMultiple = 0.8 });
+            var nearEnt = Wander(eNear, MAt110);
+            T.Check(Find(nearEnt, PzActionType.EnterShort) != null, "base entry before the blocked add");
+            eNear.OnEntryFilled(99.4);
+            Wander(eNear, 97, 95, 94);
+            One(eNear, 94, 94.8, 93.6, 94.4);
+            One(eNear, 94.4, 94.9, 93.8, 94.2);
+            One(eNear, 94.2, 94.7, 93.7, 94.0);
+            var nearBrk = One(eNear, 94.0, 94.1, 92.8, 93.2);
+            T.Check(Find(nearBrk, PzActionType.AddShort) == null, "add blocked with too little room to target");
+            T.Check(Find(nearBrk, PzActionType.DrawFlag) == null, "no flag drawn for a blocked add");
+
+            // --- Consumed swings. The M trades, then the same two tops re-form
+            // around a fresh valley. The tail (15,110.2,hi),(20,98.4,lo),
+            // (25,110.2,hi) IS a valid double top — the scanner says so below —
+            // and the triple off it is valid too; both are refused only because
+            // the traded pattern's swings are consumed. Nothing arms, so no
+            // second entry is reachable.
+            var cfgCons = new PzConfig { SwingStrength = 2 };
+            var eCons = Fresh(cfgCons);
+            var consFirst = Wander(eCons, MAt110);
+            T.Check(Find(consFirst, PzActionType.EnterShort) != null, "the M trades once");
+            eCons.OnEntryFilled(99.4);
+            eCons.OnPositionClosed();
+            // Back up to the same 110.2 top and down again: swing low at bar 20
+            // (98.4), swing high at bar 25 (110.2).
+            var consAgain = Wander(eCons, 102, 104, 106, 108, 109.2, 108, 106, 103, 100.5, 99.4);
+            T.Check(Find(consAgain, PzActionType.EnterShort) == null, "consumed swings never re-enter");
+            T.Check(Find(consAgain, PzActionType.DrawPattern) == null, "consumed swings never re-arm");
+
+            var reformed = new List<PzSwing> {
+                new PzSwing { BarIndex = 15, Price = 110.2, IsHigh = true },
+                new PzSwing { BarIndex = 20, Price = 98.4, IsHigh = false },
+                new PzSwing { BarIndex = 25, Price = 110.2, IsHigh = true } };
+            T.Check(PatternScanner.TryDouble(reformed, cfgCons, 2.0) != null, "the re-formed tail IS a double top");
         }
     }
 

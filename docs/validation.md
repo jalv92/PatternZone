@@ -112,6 +112,12 @@ Run once per must-pass episode.
 - [ ] **Zone bands are drawn once per session**, at the RTH open, and span the
       trading window. Bands repeating within one session, or missing at an
       open, is a real defect.
+- [ ] **Do not judge permission by band pixels.** The bands are drawn with the
+      ATR as it stood at the session open, while pattern permission is tested
+      with the ATR at the moment the pattern fires. The two differ, so a
+      permitted pattern can have its extreme marginally outside the drawn band
+      (or a pattern inside the band can still be refused). Judge permission by
+      the runbook rules and the rejected-pattern markers, not by the drawing.
 - [ ] No text anywhere on the chart. The design forbids labels, names and
       tables (spec decision #6).
 
@@ -169,6 +175,12 @@ the parts no unit test can reach.
       submission; the strategy must print
       `REJECTED (...) — position unprotected, flattening` and **flatten**, not
       hold the position without a stop.
+      **The platform terminating the strategy on that rejection is also an
+      acceptable outcome**, not a failure: `RealtimeErrorHandling` is left at
+      NT8's default `StopCancelClose`, which cancels working orders, closes the
+      position and stops the strategy — the outer net. Check the Log/Output to
+      see which net fired first: a `REJECTED … flattening` print means the
+      strategy's own inner net ran before the platform stepped in.
 
 - [ ] **5. Hand-cancel a bracket leg in Chart Trader.**
       Mid-position, cancel one leg by hand. Expected, and this asymmetry is
@@ -180,6 +192,11 @@ the parts no unit test can reach.
       - A hand-cancelled **stop comes back** on the next add resize.
       Both directions are safe: protection returns, profit-taking does not get
       resurrected against the operator's decision.
+      If a hand-cancel is followed by a rejection, **the platform terminating
+      the strategy is an acceptable outer-net outcome** (`RealtimeErrorHandling`
+      is at NT8's default `StopCancelClose`). Read the Log/Output to see which
+      net fired: a `REJECTED … flattening` print means the strategy's own inner
+      net ran first.
 
 - [ ] **6. Daily-loss lockout.**
       Breach `DailyLossLimitUsd` late in a session (lower it temporarily to make
@@ -311,6 +328,7 @@ to fix during validation — they are decisions with reasons.
 | **After a rejected add**, the engine takes no more adds for that trade | Fails safe. Re-arming the detector would need an anchor fill price the order layer never received, so the choice is between guessing and stopping. It stops. |
 | A **holiday or otherwise bar-less overnight** leaves the *previous* night's range standing as the overnight level, silently | Accepted residual. The overnight accumulators only roll over when overnight bars actually arrive, so a missing night inherits. Rare, and the failure direction is a stale level rather than a wrong one. |
 | `PatternOpacityPct` / `ZoneOpacityPct` are editable in the strategy dialog but **do not appear in the optimizer** | Deliberate. They are cosmetic dials; dropping `[NinjaScriptProperty]` takes them off the optimizable-parameter list while leaving them grid-editable. Nothing about how the chart looks should ever be searched over. |
+| Spec §7's flag condition that **net drift be flat or against the position** is not a separate check in the code | Deliberate, and recorded here pre-P&L so the frozen strategy is unambiguous. Drift is already bounded from both sides: the envelope cap (`FlagRangeMaxAtr` × ATR) caps how far the consolidation can travel, and the no-close-beyond-the-pole-extreme rule restarts the flag the moment price pushes on in favour. The frozen machine ships without the explicit test; adding one later is an amendment, not a fix. |
 
 ---
 

@@ -147,6 +147,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // 0, not a warmup count: the ATR warmup is enforced in OnBarUpdate
                 // (_atrBars > AtrPeriod) so the recursion still sees every bar.
                 BarsRequiredToTrade = 0;
+                // RealtimeErrorHandling stays at NT8's default (StopCancelClose):
+                // an order rejection cancels working orders, closes the position
+                // and terminates the strategy — the platform is the outer net;
+                // the strategy's own REJECTED->flatten branch is the inner one.
+                // Deliberate: IgnoreAllErrors would require complete
+                // self-managed rejection handling. Written out rather than left
+                // implicit so a platform default change cannot move it silently.
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
 
                 // FROZEN DEFAULTS — spec section 10. The statistical dials were
                 // fixed before any P&L was seen; changing one is a documented
@@ -427,6 +435,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             // before any new entry, because it runs ahead of `canTrade`.
             CheckDailyLoss();
             CheckBracketCancels(t);
+            // Went-flat retry net, same philosophy as the flatten retry below:
+            // the bar loop is where anything the event handlers missed gets a
+            // second look. OnExecutionUpdate's teardown is gated on Position
+            // reading Flat in-stack, and a closing fill can arrive before it
+            // does; left undone, `_inTrade` stays true and the engine stays
+            // InPosition for the rest of the run, rejecting every later pattern
+            // as "busy". The two pending gates keep this off a working
+            // entry/add whose fill is still in the air.
+            if (flat && _inTrade && !_entryPending && !_addPending)
+                WentFlat();
             // One Exit call is not guaranteed to fill. This test runs on every
             // bar, so it IS the retry loop — for the cutoff, the lockout, and the
             // orphan flatten. `!_inTrade` is the orphan arm: holding contracts we
@@ -694,14 +712,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             switch (a.Type)
             {
                 case PzActionType.DrawPattern:
-                    DrawPattern(a.Pattern, PatternOpacityPct);
+                    DrawPattern(a.Pattern, a.NecklineAtBreak, PatternOpacityPct);
                     break;
                 case PzActionType.DrawRejected:
                     // Both direction slots can resolve on the same bar, so an
                     // entry and a rejection can land in the SAME action batch —
                     // handled independently, no exclusivity assumed here.
                     if (DrawRejectedPatterns)
-                        DrawPattern(a.Pattern, PatternOpacityPct / 2);
+                        DrawPattern(a.Pattern, a.NecklineAtBreak, PatternOpacityPct / 2);
                     break;
                 case PzActionType.DrawFlag:
                     DrawFlag(a.Flag);
@@ -710,9 +728,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         // One line per consecutive swing pair, plus a dashed neckline segment
-        // from its first point to THIS bar's projection — the same geometry
+        // from its first point to the break bar's projection — the same geometry
         // for an accepted pattern and a rejected one, just at half opacity.
-        private void DrawPattern(PatternCandidate p, int opacityPct)
+        //
+        // `necklineAtBreak` is the ENGINE's evaluation, carried on the action.
+        // Re-deriving it here as NecklineAt(CurrentBar) would mix index spaces:
+        // the engine counts its own bars from 0 and a Playback rewind rebuilds
+        // it while NT8's CurrentBar keeps climbing, which skews sloped necklines
+        // (H&S) by the whole offset between the two counters.
+        private void DrawPattern(PatternCandidate p, double necklineAtBreak, int opacityPct)
         {
             int id = _patternSeq++;
             Brush brush = Alpha(p.IsShort ? ShortBrush : LongBrush, opacityPct);
@@ -723,7 +747,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     brush, DashStyleHelper.Solid, 2);
 
             Draw.Line(this, Tag("PZ_P" + id + "_neck"), false,
-                p.NeckP1.Time, p.NeckP1.Price, Time[0], p.NecklineAt(CurrentBar),
+                p.NeckP1.Time, p.NeckP1.Price, Time[0], necklineAtBreak,
                 brush, DashStyleHelper.Dash, 2);
         }
 
@@ -769,9 +793,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!enabled || double.IsNaN(level))
                 return;
+            // Outline gets the same opacity as the area: the areaOpacity argument
+            // only fades the fill, so a raw brush here draws a full-strength
+            // border around a 10%-opacity band.
             Draw.Rectangle(this, Tag("PZ_Z" + key + "_" + name), false,
                 start, level + hw, end, level - hw,
-                Brushes.SlateGray, Brushes.SlateGray, ZoneOpacityPct);
+                Alpha(Brushes.SlateGray, ZoneOpacityPct), Brushes.SlateGray, ZoneOpacityPct);
         }
 
         private Brush Alpha(Brush src, int pct)
@@ -895,6 +922,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!_inTrade || Position.MarketPosition != MarketPosition.Flat)
                 return;
 
+            WentFlat();
+        }
+
+        // Everything a closed trade has to release, in one place because it has
+        // two callers: OnExecutionUpdate's closing execution (the normal path)
+        // and OnBarUpdate's retry arm, for the case where Position had not yet
+        // read Flat in-stack when that execution arrived.
+        private void WentFlat()
+        {
             _inTrade = false;
             _flattenPending = false;
             _qty = 0;
@@ -907,7 +943,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _stopCancelAt = DateTime.MinValue; _targetCancelAt = DateTime.MinValue;
             // An add still working has nothing left to add to. It is a market
             // order so it has almost certainly filled already; if it fills after
-            // this, the orphan net above flattens it.
+            // this, the orphan net in OnExecutionUpdate flattens it.
             _addPending = false;
             _pendingAdd = null;
 
@@ -951,16 +987,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (n == SigStop || n == SigTarget)
             {
-                // Events for orders that are not the CURRENT references are
-                // echoes of our own cancel-replaces on an add resize — ignored
-                // wholesale. The time-based detector below cannot do this job on
-                // its own: a resize cancel and its replacement happen at the same
-                // instant with the position still open a bar later, so it would
-                // read every add as a hand-cancel and pull the target.
-                if (!ReferenceEquals(order, _stopOrder) && !ReferenceEquals(order, _targetOrder))
-                    return;
-                // Rejected is never an echo: a live position just lost a bracket
-                // leg, and unprotected is not a state this strategy holds.
+                // REJECTED IS TESTED FIRST, AHEAD OF THE REFERENCE FILTER BELOW.
+                // Rejected is never an echo: our cancel-replaces echo as
+                // Cancelled, never Rejected, so a name-matched Rejected bracket
+                // event is always a real leg dying on a live position. Filtering
+                // by reference first would swallow it in the exact case that
+                // matters — SubmitExits nulls both refs BEFORE it submits, so a
+                // new aggregate stop rejected in-stack arrives while they are
+                // still null, and the position would sit unprotected with not
+                // even a print to show for it.
                 if (orderState == OrderState.Rejected)
                 {
                     if (Position.MarketPosition != MarketPosition.Flat && !_flattenPending)
@@ -970,6 +1005,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                     return;
                 }
+                // Events for orders that are not the CURRENT references are
+                // echoes of our own cancel-replaces on an add resize — ignored
+                // wholesale. The time-based detector below cannot do this job on
+                // its own: a resize cancel and its replacement happen at the same
+                // instant with the position still open a bar later, so it would
+                // read every add as a hand-cancel and pull the target.
+                if (!ReferenceEquals(order, _stopOrder) && !ReferenceEquals(order, _targetOrder))
+                    return;
                 // Stamp only; CheckBracketCancels decides a bar later, once a
                 // closing fill has had the chance to wipe it.
                 if (orderState == OrderState.Cancelled
