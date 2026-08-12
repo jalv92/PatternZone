@@ -338,4 +338,198 @@ namespace PatternZoneCore
             };
         }
     }
+
+    // Continuation add-on: arm on a fill's direction/price, feed closed bars
+    // while armed. Tracks a favorable-extreme "pole" from the anchor, then a
+    // tight "flag" consolidation after it; fires an add trigger when price
+    // closes beyond the flag envelope in favor. State machine per task-6 spec.
+    public sealed class FlagInfo
+    {
+        public int PoleStartBar, PoleEndBar;         // anchor bar -> pole extreme bar
+        public double PoleStartPrice, PoleEndPrice;
+        public int FlagStartBar, FlagEndBar;         // consolidation window
+        public double FlagHigh, FlagLow;
+        // Chart times so the drawing layer never has to map bar indexes back:
+        public DateTime PoleStartTime, PoleEndTime, FlagStartTime;
+    }
+
+    public sealed class FlagDetector
+    {
+        private readonly PzConfig _cfg;
+
+        private bool _armed;
+        private int _dir;
+        private double _anchorPrice;
+        private int _anchorBar;
+        private DateTime _anchorTime;
+        private bool _anchorTimeKnown;
+
+        private double _extreme;
+        private int _extremeBar;
+        private DateTime _extremeTime;
+
+        private bool _flagActive;
+        private int _flagCount;
+        private double _flagHigh, _flagLow;
+        private int _flagStartBar, _flagEndBar;
+        private DateTime _flagStartTime;
+
+        public FlagDetector(PzConfig cfg)
+        {
+            _cfg = cfg;
+        }
+
+        public void Arm(int dir, double anchorPrice, int anchorBar)
+        {
+            _armed = true;
+            _dir = dir;
+            _anchorPrice = anchorPrice;
+            _anchorBar = anchorBar;
+            _anchorTimeKnown = false;
+            _extreme = anchorPrice;
+            _extremeBar = anchorBar;
+            _flagActive = false;
+            _flagCount = 0;
+        }
+
+        public void Disarm()
+        {
+            _armed = false;
+        }
+
+        public FlagInfo Update(PzBar bar, int barIndex, double atr)
+        {
+            if (!_armed)
+                return null;
+            // ponytail: Arm() takes no bar time (price/index only), so the
+            // exact anchor-bar time is unknown; approximate with the first
+            // fed bar's time. Re-anchors below see the real bar and are exact.
+            if (!_anchorTimeKnown)
+            {
+                _anchorTime = bar.Time;
+                _anchorTimeKnown = true;
+            }
+
+            return _flagActive
+                ? UpdateBuildingFlag(bar, barIndex, atr)
+                : UpdateWaitingForPole(bar, barIndex, atr);
+        }
+
+        private FlagInfo UpdateWaitingForPole(PzBar bar, int barIndex, double atr)
+        {
+            double candidate = _dir > 0 ? bar.High : bar.Low;
+            bool extended = _dir > 0 ? candidate > _extreme : candidate < _extreme;
+            if (extended)
+            {
+                _extreme = candidate;
+                _extremeBar = barIndex;
+                _extremeTime = bar.Time;
+                return null;
+            }
+            if (!PoleExists(atr))
+                return null;
+
+            _flagActive = true;
+            AddFlagBar(bar, barIndex);
+            return CheckEnvelope(bar, barIndex, atr);
+        }
+
+        private FlagInfo UpdateBuildingFlag(PzBar bar, int barIndex, double atr)
+        {
+            if (_flagCount < _cfg.FlagMinBars)
+            {
+                if (_dir * (bar.Close - _extreme) > 0)
+                {
+                    // Close beyond the pole extreme in favor before the flag
+                    // matured: still the pole, not a consolidation yet.
+                    // Extend the extreme and restart the flag.
+                    _extreme = _dir > 0 ? bar.High : bar.Low;
+                    _extremeBar = barIndex;
+                    _extremeTime = bar.Time;
+                    _flagCount = 0;
+                    return null;
+                }
+                AddFlagBar(bar, barIndex);
+                return CheckEnvelope(bar, barIndex, atr);
+            }
+
+            bool trigger = _dir > 0
+                ? bar.Close >= _flagHigh + _cfg.TickSize
+                : bar.Close <= _flagLow - _cfg.TickSize;
+            if (trigger)
+            {
+                FlagInfo info = BuildInfo();
+                Reanchor(bar, barIndex);
+                return info;
+            }
+            AddFlagBar(bar, barIndex);
+            return CheckEnvelope(bar, barIndex, atr);
+        }
+
+        private bool PoleExists(double atr)
+        {
+            return _dir * (_extreme - _anchorPrice) >= _cfg.PoleMinAtr * atr
+                && _extremeBar - _anchorBar <= _cfg.PoleMaxBars;
+        }
+
+        private void AddFlagBar(PzBar bar, int barIndex)
+        {
+            if (_flagCount == 0)
+            {
+                _flagHigh = bar.High;
+                _flagLow = bar.Low;
+                _flagStartBar = barIndex;
+                _flagStartTime = bar.Time;
+            }
+            else
+            {
+                _flagHigh = Math.Max(_flagHigh, bar.High);
+                _flagLow = Math.Min(_flagLow, bar.Low);
+            }
+            _flagEndBar = barIndex;
+            _flagCount++;
+        }
+
+        // Range/max-bars breach re-anchors regardless of how the flag bar
+        // arrived (fresh start or already-matured flag still accreting).
+        private FlagInfo CheckEnvelope(PzBar bar, int barIndex, double atr)
+        {
+            bool tooWide = _flagHigh - _flagLow > _cfg.FlagRangeMaxAtr * atr;
+            bool tooLong = _flagCount > _cfg.FlagMaxBars;
+            if (tooWide || tooLong)
+                Reanchor(bar, barIndex);
+            return null;
+        }
+
+        private void Reanchor(PzBar bar, int barIndex)
+        {
+            _anchorPrice = bar.Close;
+            _anchorBar = barIndex;
+            _anchorTime = bar.Time;
+            _anchorTimeKnown = true;
+            _extreme = _anchorPrice;
+            _extremeBar = barIndex;
+            _extremeTime = bar.Time;
+            _flagActive = false;
+            _flagCount = 0;
+        }
+
+        private FlagInfo BuildInfo()
+        {
+            return new FlagInfo
+            {
+                PoleStartBar = _anchorBar,
+                PoleEndBar = _extremeBar,
+                PoleStartPrice = _anchorPrice,
+                PoleEndPrice = _extreme,
+                FlagStartBar = _flagStartBar,
+                FlagEndBar = _flagEndBar,
+                FlagHigh = _flagHigh,
+                FlagLow = _flagLow,
+                PoleStartTime = _anchorTime,
+                PoleEndTime = _extremeTime,
+                FlagStartTime = _flagStartTime,
+            };
+        }
+    }
 }

@@ -29,6 +29,7 @@ namespace PatternZone.Tests
             DoubleTests.Run();
             TripleHsTests.Run();
             ZoneTests.Run();
+            FlagTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
         }
@@ -188,6 +189,44 @@ namespace PatternZone.Tests
             T.Check(z.Permits(tt, atr, out lvl), "triple 2-of-3 permitted");
             var hs = new PatternCandidate { Kind = PatternKind.HeadShoulders, IsShort = true, ZoneExtremes = new[] { 110.5 }, ExtremePrice = 110.5 };
             T.Check(z.Permits(hs, atr, out lvl), "HS head permitted");
+        }
+    }
+
+    public static class FlagTests
+    {
+        static PzBar B(double o, double h, double l, double c)
+        {
+            return new PzBar { Time = new DateTime(2026, 8, 12, 10, 0, 0), Open = o, High = h, Low = l, Close = c };
+        }
+
+        public static void Run()
+        {
+            Console.WriteLine("FlagTests");
+            var cfg = new PzConfig();          // PoleMin 2.0*atr, flag 3-10 bars, range <= 1.0*atr
+            var fd = new FlagDetector(cfg);
+            double atr = 2.0;                  // pole >= 4.0, flag range <= 2.0
+            fd.Arm(1, 100.0, 0);               // long from 100
+
+            FlagInfo got = null; int bar = 1;
+            // Pole: 3 bars up to 105 (move 5 >= 4).
+            foreach (var b in new[] { B(100,102,100,102), B(102,104,102,104), B(104,105,103.5,104.8) })
+                { got = fd.Update(b, bar++, atr); T.Check(got == null, "no trigger during pole " + bar); }
+            // Flag: 3 tight bars, envelope [103.8, 104.9] (range 1.1 <= 2).
+            foreach (var b in new[] { B(104.8,104.9,104.0,104.2), B(104.2,104.5,103.8,104.0), B(104.0,104.6,103.9,104.5) })
+                { got = fd.Update(b, bar++, atr); T.Check(got == null, "no trigger during flag " + bar); }
+            // Breakout close 105.4 >= FlagHigh 104.9 + tick 0.25.
+            got = fd.Update(B(104.5, 105.5, 104.4, 105.4), bar++, atr);
+            T.Check(got != null, "flag breakout triggers");
+            T.CheckClose(got.FlagHigh, 104.9, "flag high");
+            T.CheckClose(got.FlagLow, 103.8, "flag low");
+            T.CheckClose(got.PoleEndPrice, 105.0, "pole extreme");
+
+            // Wide 'flag' (envelope > 2.0) never triggers: detector re-anchors.
+            var fd2 = new FlagDetector(cfg);
+            fd2.Arm(1, 100.0, 0); bar = 1;
+            foreach (var b in new[] { B(100,102,100,102), B(102,104,102,104), B(104,105,103.5,104.8),
+                                      B(104.8,105,101,101.5), B(101.5,104.9,101,104.6), B(104.6,104.9,104,104.2) })
+                T.Check(fd2.Update(b, bar++, atr) == null, "wide flag never triggers " + bar);
         }
     }
 }
