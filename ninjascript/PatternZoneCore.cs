@@ -651,6 +651,16 @@ namespace PatternZoneCore
             _flags.Disarm();
         }
 
+        // Add submission rejected: the base position is untouched, so back to
+        // in-position with the add count unspent. The detector stays disarmed
+        // (emitting the add disarmed it) — no more adds this trade. Fails safe:
+        // an add rejection is rare, and re-arming would need an anchor price
+        // the order layer never got.
+        public void OnAddFailed()
+        {
+            _state = PzState.InPosition;
+        }
+
         public void OnPositionClosed()
         {
             _state = PzState.Flat;

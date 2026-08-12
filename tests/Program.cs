@@ -306,6 +306,43 @@ namespace PatternZone.Tests
             T.Check(Find(second, PzActionType.EnterShort) == null, "capped session does not enter again");
             T.Check(Rejected(second, "session_cap") != null, "session_cap rejection");
 
+            // --- A rejected add releases the awaiting-add state and fails safe.
+            // TargetMultiple 2.0 puts the target at 79.6 so the second flag has
+            // room to spare on the distance guard: if the detector were still
+            // live, that flag WOULD add, which is what makes this a real check.
+            var eAdd = Fresh(new PzConfig { SwingStrength = 2, TargetMultiple = 2.0 });
+            Wander(eAdd, MAt110);
+            eAdd.OnEntryFilled(99.4);
+            Wander(eAdd, 97, 95, 94);
+            One(eAdd, 94, 94.8, 93.6, 94.4);
+            One(eAdd, 94.4, 94.9, 93.8, 94.2);
+            One(eAdd, 94.2, 94.7, 93.7, 94.0);
+            var addBrk = One(eAdd, 94.0, 94.1, 92.8, 93.2);
+            T.Check(Find(addBrk, PzActionType.AddShort) != null, "add emitted before the failure");
+            eAdd.OnAddFailed();
+
+            // (a) the same proven pole+flag shape six points lower, measured
+            // from where a still-armed detector would have re-anchored (93.2).
+            var afterFail = Wander(eAdd, 91, 89, 88);
+            One(eAdd, 88, 88.8, 87.6, 88.4);
+            One(eAdd, 88.4, 88.9, 87.8, 88.2);
+            One(eAdd, 88.2, 88.7, 87.7, 88.0);
+            afterFail.AddRange(One(eAdd, 88.0, 88.1, 86.8, 87.2));
+            T.Check(Find(afterFail, PzActionType.AddShort) == null, "no add after OnAddFailed");
+
+            // (b) still in position, so a new confirmation is still busy.
+            var busyAfterFail = Wander(eAdd, Shift(MAt110, -10));
+            T.Check(Rejected(busyAfterFail, "busy") != null, "busy still rejects after OnAddFailed");
+            T.Check(Find(busyAfterFail, PzActionType.EnterShort) == null, "no entry after OnAddFailed");
+
+            // (c) flat + new session recovers normal trading (two extra closes
+            // for the triple-neckline case, as in the session-reset check).
+            eAdd.OnPositionClosed();
+            eAdd.OnSessionOpen(new SessionLevels { PriorDayHigh = 110.0 });
+            var recovered = Wander(eAdd, MAt110);
+            recovered.AddRange(Wander(eAdd, 98, 97));
+            T.Check(Find(recovered, PzActionType.EnterShort) != null, "trading recovers after OnAddFailed");
+
             // --- canTrade false: the shell already knows why, so nothing at all
             // is emitted (not even a rejection).
             var eLocked = Fresh(new PzConfig { SwingStrength = 2 });
