@@ -440,8 +440,12 @@ namespace PatternZone.Tests
             eCons.OnEntryFilled(99.4);
             eCons.OnPositionClosed();
             // Back up to the same 110.2 top and down again: swing low at bar 20
-            // (98.4), swing high at bar 25 (110.2).
-            var consAgain = Wander(eCons, 102, 104, 106, 108, 109.2, 108, 106, 103, 100.5, 99.4);
+            // (98.4), swing high at bar 25 (110.2). The last two closes drive
+            // through the re-formed neckline (98.4 - NecklineBreakTicks*TickSize
+            // = 97.9) so this fixture fires on its OWN assertions if the
+            // consumed marks ever stop being applied — without them the tail
+            // arms a triple top and 97.4 breaks it.
+            var consAgain = Wander(eCons, 102, 104, 106, 108, 109.2, 108, 106, 103, 100.5, 99.4, 98.5, 97.4);
             T.Check(Find(consAgain, PzActionType.EnterShort) == null, "consumed swings never re-enter");
             T.Check(Find(consAgain, PzActionType.DrawPattern) == null, "consumed swings never re-arm");
 

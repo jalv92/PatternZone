@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/edge-not%20measured-lightgrey?style=flat-square" alt="edge: not measured">
   <img src="https://img.shields.io/badge/platform-NinjaTrader%208-1f6feb?style=flat-square" alt="platform: NinjaTrader 8">
   <img src="https://img.shields.io/badge/instrument-MNQ%201m-f7931a?style=flat-square" alt="instrument: MNQ 1-minute">
-  <img src="https://img.shields.io/badge/tests-109%20passing-brightgreen?style=flat-square" alt="tests: 109 passing">
+  <img src="https://img.shields.io/badge/tests-121%20passing-brightgreen?style=flat-square" alt="tests: 121 passing">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
@@ -38,7 +38,7 @@ Nothing on this page is a claim about profitability.
 
 | Phase | What it establishes | Status |
 |---|---|---|
-| Unit tests | The detection and decision core behaves as specified | **109 passing** |
+| Unit tests | The detection and decision core behaves as specified | **121 passing** |
 | 1 — Visual QA | The detector sees the patterns a human sees | Pending |
 | 2 — Order-layer exercises | The order plumbing survives the events that break NT8 strategies | Pending |
 | 3 — Frozen backtest | Whether there is anything here at all | Not run |
