@@ -114,4 +114,58 @@ namespace PatternZoneCore
             return result;
         }
     }
+
+    public enum PatternKind { DoubleTop, DoubleBottom, TripleTop, TripleBottom, HeadShoulders, InverseHeadShoulders }
+
+    public sealed class PatternCandidate
+    {
+        public PatternKind Kind;
+        public bool IsShort;                 // top-family => short
+        public PzSwing[] Swings;             // defining swings, oldest first (3 or 5)
+        public double ExtremePrice;          // stop anchor: max top / head / min bottom
+        public int ArmedBarIndex;            // bar the candidate was created on
+        // Neckline as a 2-point line; equal points => horizontal.
+        public PzSwing NeckP1, NeckP2;
+        public double[] ZoneExtremes;        // prices that must touch a zone (2 tops, 3 tops, or head)
+
+        public double NecklineAt(int barIndex)
+        {
+            if (NeckP2.BarIndex == NeckP1.BarIndex)
+                return NeckP1.Price;
+            double slope = (NeckP2.Price - NeckP1.Price) / (NeckP2.BarIndex - NeckP1.BarIndex);
+            return NeckP1.Price + slope * (barIndex - NeckP1.BarIndex);
+        }
+    }
+
+    public static class PatternScanner
+    {
+        // Each returns null or a candidate built from the TAIL of the alternating swing list.
+        public static PatternCandidate TryDouble(IReadOnlyList<PzSwing> swings, PzConfig cfg, double atr)
+        {
+            if (swings.Count < 3)
+                return null;
+
+            PzSwing a = swings[swings.Count - 3];
+            PzSwing b = swings[swings.Count - 2];
+            PzSwing c = swings[swings.Count - 1];
+
+            if (a.IsHigh != c.IsHigh || b.IsHigh == a.IsHigh)
+                return null;
+            if (Math.Abs(a.Price - c.Price) > cfg.TopToleranceAtr * atr)
+                return null;
+
+            bool isTop = a.IsHigh;
+            return new PatternCandidate
+            {
+                Kind = isTop ? PatternKind.DoubleTop : PatternKind.DoubleBottom,
+                IsShort = isTop,
+                Swings = new[] { a, b, c },
+                ExtremePrice = isTop ? Math.Max(a.Price, c.Price) : Math.Min(a.Price, c.Price),
+                ArmedBarIndex = c.BarIndex,
+                NeckP1 = b,
+                NeckP2 = b,
+                ZoneExtremes = new[] { a.Price, c.Price },
+            };
+        }
+    }
 }

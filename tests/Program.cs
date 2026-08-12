@@ -26,6 +26,7 @@ namespace PatternZone.Tests
             // Each task appends its suite here.
             T.Check(true, "smoke");
             CoreTests.Run();
+            DoubleTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
         }
@@ -68,6 +69,38 @@ namespace PatternZone.Tests
             sd2.Update(B(100, 103, 99, 100), 1);
             var r2 = sd2.Update(B(100, 101, 99, 100), 2);
             T.Check(r2.Count == 0, "tied extreme rejected");
+        }
+    }
+
+    public static class DoubleTests
+    {
+        static PzSwing S(int bar, double px, bool hi)
+        {
+            return new PzSwing { BarIndex = bar, Time = new DateTime(2026, 8, 12).AddMinutes(bar), Price = px, IsHigh = hi };
+        }
+
+        public static void Run()
+        {
+            Console.WriteLine("DoubleTests");
+            var cfg = new PzConfig();          // TopToleranceAtr 0.30
+            double atr = 2.0;                  // tolerance = 0.6
+
+            var sw = new List<PzSwing> { S(0, 100, false), S(10, 110, true), S(15, 105, false), S(20, 110.3, true) };
+            var c = PatternScanner.TryDouble(sw, cfg, atr);
+            T.Check(c != null && c.Kind == PatternKind.DoubleTop && c.IsShort, "double top found");
+            T.CheckClose(c.ExtremePrice, 110.3, "DT extreme = higher top");
+            T.CheckClose(c.NecklineAt(25), 105.0, "DT neckline horizontal at valley");
+            T.Check(c.ZoneExtremes.Length == 2, "DT zone extremes = both tops");
+
+            // Tops too far apart (diff 0.7 > 0.6) -> null.
+            var sw2 = new List<PzSwing> { S(0, 100, false), S(10, 110, true), S(15, 105, false), S(20, 110.7, true) };
+            T.Check(PatternScanner.TryDouble(sw2, cfg, atr) == null, "tolerance rejects");
+
+            // Mirror: double bottom -> long.
+            var sw3 = new List<PzSwing> { S(0, 110, true), S(10, 100, false), S(15, 104, true), S(20, 100.2, false) };
+            var c3 = PatternScanner.TryDouble(sw3, cfg, atr);
+            T.Check(c3 != null && c3.Kind == PatternKind.DoubleBottom && !c3.IsShort, "double bottom found");
+            T.CheckClose(c3.ExtremePrice, 100.0, "DB extreme = lower bottom");
         }
     }
 }
