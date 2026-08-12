@@ -143,11 +143,18 @@ the parts no unit test can reach.
       Take a trade that gets one flag add. The account panel must show
       **base + adds** (2 contracts at `Contracts = 1, MaxAdds = 1`).
       *If a discrepancy is suspected*, temporarily add a print at the top of
-      `SubmitExits` and diff a whole session:
+      **`OnBarUpdate`** — not inside `SubmitExits` — and diff a whole session:
       ```csharp
       Print(Name + " qty check: internal=" + _qty + " position=" + Position.Quantity);
       ```
       The two must agree on every line. Remove the print afterwards.
+      **Why not `SubmitExits`:** it runs inside `OnExecutionUpdate`, after
+      `_qty` has taken the fill being reported and before `Position.Quantity`
+      necessarily reflects it. `_qty` legitimately leads there by the size of
+      that fill; comparing at that point manufactures a failure. The tracker
+      sums executions deliberately, because the brackets must cover the fill
+      being reported *now* — do not "fix" it to read `Position` instead, which
+      re-opens the bug it was written to avoid.
 
 - [ ] **3. Orphan-flatten net actually submits.**
       With `Contracts = 2`, or by rewinding Playback while a position is open,
@@ -198,9 +205,22 @@ design was shaped around are not evidence of an edge.
 
 Setup, all of it mandatory:
 
+- [ ] **Undo Phase 2 first.** Phase 2 told you to change values and NT8 keeps
+      them in the strategy template. Reset **`Contracts` → 1**,
+      **`TargetMultiple` → 1.0**, **`DailyLossLimitUsd` → 200**, then read the
+      **whole parameter grid** against the README's parameter table. A
+      leftover `TargetMultiple = 0.3` produces a complete, plausible, worthless
+      backtest, and the generic "defaults untouched" instruction below will not
+      catch it.
 - [ ] Strategy Analyzer, MNQ, the **longest available 1-minute history**.
       (NQ substitution is allowed only as a documented fallback if MNQ history
       is short, with costs kept at MNQ scale — write it in the result log.)
+- [ ] **Full ETH session template in the Analyzer's own Data Series dialog.**
+      The Analyzer does not inherit a chart's template — it has its own
+      selector, and an RTH-only choice here silently deletes 2 of the 6
+      permission levels exactly as it would on a chart. After the run, check
+      the **Log tab** for `a full RTH session opened with no overnight bars`
+      before trusting a single number.
 - [ ] **Order Fill Resolution = High, 1 Tick.**
 - [ ] **Commission $1.34 per round turn** per contract (spec range $1.24–1.54).
 - [ ] **Slippage 2 ticks** ($1.00 on MNQ). Combined assumption:
@@ -226,7 +246,9 @@ Report alongside them, not gating but recorded: max drawdown (≤ ⅓ of annual
 net), Sortino (≥ 1.5), positive months (≥ 55%), and win rate against its
 breakeven. **On the breakeven:** at the minimum pattern height the geometry is
 reward ≈ 1.5×ATR against risk ≈ 2.0×ATR (height + the 0.5×ATR stop buffer), so
-breakeven sits near **57%** before costs and improves as patterns get taller. A
+breakeven sits near **57%** before costs — a floor, and a touch higher in
+practice, since entry sits past the neckline rather than on it, which shortens
+the target and lengthens the stop. It improves as patterns get taller. A
 win rate in the low 50s with these defaults is a losing strategy, not a
 marginal one.
 

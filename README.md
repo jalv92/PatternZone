@@ -108,6 +108,11 @@ Patterns shorter than 1.5 × ATR are rejected as noise — which also guarantees
 the stop is wider than one ATR, since stops below that are noise-stopped by
 construction on this instrument.
 
+Worth stating plainly: at the minimum pattern height this risks more than it
+makes. Reward is 1.5 × ATR against risk of 2.0 × ATR once the stop buffer is
+added — **0.75R at the default target multiple**, so breakeven sits near 57%
+before costs. Taller patterns improve the ratio; the floor does not.
+
 **Adds — continuation patterns, never standalone.** While a position is open, a
 bull or bear flag can add one tranche: a pole of ≥ 2 × ATR within 8 bars of the
 last fill, then 3–10 bars consolidating inside 1 × ATR, then a close out of the
@@ -131,8 +136,11 @@ without becoming a dashboard.
    - `ninjascript/PatternZoneStrategy.cs`
    - `ninjascript/PatternZoneCore.cs`
 
-   Both go in `Strategies\` — the namespace decides the folder, not the role.
-   `PatternZoneCore.cs` is deliberately free of any `NinjaTrader` reference so
+   Both go in `Strategies\`. NT8 compiles everything under `bin\Custom` into a
+   single assembly, so the partner file simply belongs beside the strategy it
+   serves — `PatternZoneCore.cs` declares its own `PatternZoneCore` namespace,
+   so the usual "the namespace decides the folder" rule does not apply to it.
+   That namespace is also deliberately free of any `NinjaTrader` reference, so
    the same file compiles inside NT8 and under the .NET 8 test runner.
 2. Press **F5** in the NinjaScript Editor.
 3. Apply `PatternZoneStrategy` to a chart meeting these requirements — each one
