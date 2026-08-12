@@ -71,7 +71,7 @@ A confirmed pattern is **tradeable only if its defining extreme(s) touch a zone*
 | Round numbers ×100 | every 100 pts (e.g. 29,900 / 30,000) | on |
 | Round numbers ×50 | intermediate 50s | off |
 
-Zone band = level ± `ZoneHalfWidthAtr` × ATR. Session levels (PDH/PDL, ON H/L, prior close, day open) recompute once per session at the RTH open. Round-number zones are evaluated against the **nearest** ×100 (×50) level to the pattern extreme — no pre-materialized list.
+Zone band = level ± `ZoneHalfWidthAtr` × ATR, **plus `ZoneProximityAtr` × ATR of proximity allowance for permission only** (Amendment 1): a pattern that forms *near* a level qualifies too. The band drawn on the chart stays the half-width, so the permission reaches further than what is painted — deliberate, and called out in the validation runbook so it is not read as a drawing bug. Session levels (PDH/PDL, ON H/L, prior close, day open) recompute once per session at the RTH open. Round-number zones are evaluated against the **nearest** ×100 (×50) level to the pattern extreme — no pre-materialized list.
 
 **Data/session handling:** single 1m MNQ series on the instrument's full ETH session template (overnight data must exist in the series). The strategy trades only inside the parametrized RTH window and computes level windows internally via session/time logic.
 
@@ -79,8 +79,8 @@ Zone band = level ± `ZoneHalfWidthAtr` × ATR. Session levels (PDH/PDL, ON H/L,
 
 - **Direction:** top-family patterns → short; bottom-family → long.
 - **Entry:** market, open of the bar after the confirming close.
-- **Stop:** pattern extreme (highest top / head / lowest bottom) ± `StopBufferAtr` × ATR.
-- **Target:** measured move — pattern height projected from the break point, × `TargetMultiple` (default 1.0). Classic rule; risk ≈ height + buffer vs reward ≈ height.
+- **Stop:** the pattern's **last defining swing** ± `StopOffsetTicks` ticks (Amendment 1). That swing is always the last extreme — second top/bottom, third extreme of a triple, right shoulder of an H&S (deliberately **not** the head). The extreme keeps its other job: a close beyond it still invalidates an armed candidate. `StopBufferAtr` now governs only the add-on's aggregate stop (§7).
+- **Target:** measured move — pattern height projected from the break point, × `TargetMultiple` (default 1.0). Classic rule; risk ≈ (neckline→last swing) + offset vs reward ≈ height.
 - One position at a time, flat-to-flat. One shot per pattern; no re-entry on the same neckline.
 - While a position is open, new reversal confirmations are **ignored** — no reversing, no stacking beyond the flag add-on. They draw only if `DrawRejectedPatterns`.
 - Forced flat at trading-window end.
@@ -98,11 +98,11 @@ Armed only while a position is open (and adds remaining < `MaxAdds`):
 
 ## 8. Drawing layer (no text, ever)
 
-- **Reversal entry:** semi-transparent polyline over the defining swings (the M / W zigzag; 5-point H&S) + a horizontal neckline segment spanning the pattern. Drawn at confirmation.
+- **Reversal entry:** semi-transparent polyline over the defining swings (the M / W zigzag; 5-point H&S). Drawn at confirmation. **No neckline segment** (Amendment 1 — Javier does not want it on the chart).
 - **Flag add:** pole line + the two parallel channel lines of the flag.
-- **Zones:** faint horizontal bands (level ± half-width), `DrawZones` toggle.
+- **Zones:** faint horizontal bands (level ± half-width), `DrawZones` toggle. The band drawn is the half-width only; permission reaches `ZoneProximityAtr` further (§5), so a permitted extreme can sit outside the drawn band.
 - **Rejected patterns** (out-of-zone / under-height / flag-without-position): even fainter, `DrawRejectedPatterns` (default off) — audit tool for Replay.
-- Colors: `LongBrush` / `ShortBrush` / `AddonBrush`, opacity `PatternOpacityPct` (default 40) and `ZoneOpacityPct` (default 10). Thin strokes, `DrawOnPricePanel`, no autoscale, tags per internal pattern id, drawings persist for the session.
+- Colors: `LongBrush` / `ShortBrush` / `AddonBrush`, opacity `PatternOpacityPct` (default 65) and `ZoneOpacityPct` (default 10). Stroke width `PatternLineWidth` (default 4), `DrawOnPricePanel`, no autoscale, tags per internal pattern id, drawings persist for the session.
 - No labels, no names, no tables (decision #6).
 
 ## 9. Account risk
@@ -125,23 +125,25 @@ Statistical dials (frozen before any P&L is seen; changes = documented amendment
 | 5 | NecklineBreakTicks | 2 |
 | 6 | MinPatternHeightAtr | 1.5 |
 | 7 | ZoneHalfWidthAtr | 0.50 |
-| 8–13 | Level toggles (PDH/PDL, ON H/L, prior close, day open, ×100, ×50) | on ×5, ×50 off |
-| 14 | StopBufferAtr | 0.50 |
-| 15 | TargetMultiple | 1.0 |
-| 16 | EnableFlagAddon | true |
-| 17 | PoleMinAtr | 2.0 |
-| 18 | PoleMaxBars | 8 |
-| 19 | FlagMinBars | 3 |
-| 20 | FlagMaxBars | 10 |
-| 21 | FlagRangeMaxAtr | 1.0 |
-| 22 | MinDistToTargetAtr | 1.5 |
-| 23 | MaxAdds | 1 |
-| 24 | Contracts | 1 |
-| 25 | MaxTradesPerSession | 3 |
-| 26 | DailyLossLimitUsd | 200 |
-| 27–28 | TradingStart / TradingEnd | 09:30 / 15:55 ET |
+| 8 | ZoneProximityAtr *(Amendment 1)* | 0.50 |
+| 9–14 | Level toggles (PDH/PDL, ON H/L, prior close, day open, ×100, ×50) | on ×5, ×50 off |
+| 15 | StopOffsetTicks *(Amendment 1)* | 10 |
+| 16 | StopBufferAtr *(add-on stop only since Amendment 1)* | 0.50 |
+| 17 | TargetMultiple | 1.0 |
+| 18 | EnableFlagAddon | true |
+| 19 | PoleMinAtr | 2.0 |
+| 20 | PoleMaxBars | 8 |
+| 21 | FlagMinBars | 3 |
+| 22 | FlagMaxBars | 10 |
+| 23 | FlagRangeMaxAtr | 1.0 |
+| 24 | MinDistToTargetAtr | 1.5 |
+| 25 | MaxAdds | 1 |
+| 26 | Contracts | 1 |
+| 27 | MaxTradesPerSession | 3 |
+| 28 | DailyLossLimitUsd | 200 |
+| 29–30 | TradingStart / TradingEnd | 09:30 / 15:55 ET |
 
-Cosmetic dials (free to change anytime): LongBrush, ShortBrush, AddonBrush, PatternOpacityPct (40), ZoneOpacityPct (10), DrawZones (true), DrawRejectedPatterns (false).
+Cosmetic dials (free to change anytime): LongBrush, ShortBrush, AddonBrush, PatternOpacityPct (65), ZoneOpacityPct (10), PatternLineWidth (4), DrawZones (true), DrawRejectedPatterns (false).
 
 ## 11. NT8 implementation notes
 
@@ -183,3 +185,39 @@ Deliverables in order: repo scaffold → strategy .cs (compiling via nt8c) → d
 - PropSim mirror / placebo controls (route B; can be retrofitted later using the PullbackZone mirror playbook).
 - 30-second detection timeframe.
 - Prop-firm envelope logic.
+
+## Amendments
+
+Every change to the frozen spec after it was written lands here, dated, with
+what was known at the time. The §10 table above carries the current values; this
+section is the audit trail of how they got there.
+
+**Amendment 1 — 2026-08-12 (pre-P&L, from Phase 1 visual QA).** Javier's
+feedback after watching the detector draw on a live chart. No P&L existed yet,
+which is the only honest moment to change the frozen dials — nothing here was
+chosen by looking at a result.
+
+1. **Entry stop = the pattern's last defining swing ± `StopOffsetTicks`**
+   (default 10), replacing extreme ± `StopBufferAtr` × ATR. The last defining
+   swing is always the last extreme: second top/bottom, third extreme of a
+   triple, and the **right shoulder** of an H&S — not the head, which is where
+   the two rules differ most (an H&S stop is now materially tighter). The
+   pattern extreme keeps its other role as the candidate-invalidation level.
+   `StopBufferAtr` survives, governing **only** the add-on's aggregate stop
+   (flag far edge ∓ `StopBufferAtr` × ATR), which is unchanged.
+2. **The neckline is no longer drawn.** The swing polyline stays; the dashed
+   neckline segment is gone from both the accepted and rejected paths. The
+   engine still computes and carries `NecklineAtBreak` as the trigger price of
+   record — the drawing layer simply no longer consumes it.
+3. **Visibility:** `PatternLineWidth` added (default 4, cosmetic, applies to the
+   pattern polyline and the flag's pole and rails); `PatternOpacityPct` default
+   40 → 65.
+4. **`ZoneProximityAtr` added** (default 0.50): the permission band becomes
+   (`ZoneHalfWidthAtr` + `ZoneProximityAtr`) × ATR, so patterns forming near a
+   level qualify. The **drawn** band is unchanged at the half-width, so
+   permission deliberately reaches further than the painted band.
+
+Consequence for the geometry: risk is no longer a pure ATR multiple, since the
+stop offset is a fixed tick distance while the pattern height is ATR-scaled.
+There is no single R floor across pattern families any more — see
+`docs/validation.md` (Phase 3, "On the breakeven") for the recomputed numbers.

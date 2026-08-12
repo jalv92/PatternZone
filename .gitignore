@@ -1,3 +1,5 @@
 bin/
 obj/
 .superpowers/
+# Agent hand-off reports: the repo keeps the amendment, not the write-up of it.
+docs/.*-report.md

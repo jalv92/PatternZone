@@ -66,8 +66,12 @@ project. Both on **MNQ 09-26, 1-minute**:
 
 | # | Episode | Approx. price | Must be |
 |---|---|---|---|
-| 1 | Double top | ~29,985 | detected, drawn as an M over the two tops with its neckline, and permitted (a zone band under the tops) |
-| 2 | Double bottom / W | ~29,650 | detected, drawn as a W with its neckline, and permitted |
+| 1 | Double top | ~29,985 | detected, drawn as an M over the two tops, breaking on the bar a human would call the break, and permitted (a zone band under the tops) |
+| 2 | Double bottom / W | ~29,650 | detected, drawn as a W, breaking on the same bar a human would, and permitted |
+
+The neckline is **not drawn** since Amendment 1, so it cannot be compared
+against the hand annotation directly. Judge it by proxy: the entry arrow lands
+on the bar whose close broke the level you would have drawn.
 
 - [ ] **Pin the exact dates first.** Open the chart, find both episodes by
       price, and write the two session dates into the [result log](#result-log)
@@ -89,7 +93,7 @@ Run once per must-pass episode.
       complete and drawn. Save it; these captures are also the README's images
       (`docs/assets/hero.png`, `entries.png`, `zones.png`).
 - [ ] **5. Compare** — put the capture next to the hand-annotated screenshot.
-      Same swings? Same neckline? Break on the same bar?
+      Same swings? Entry on the same bar you would have taken?
 - [ ] **6. Verdict** — PASS or FAIL in the result log, with the reason. A FAIL
       stops the run and goes back to the detector.
 
@@ -104,20 +108,30 @@ Run once per must-pass episode.
 
 ### Eyeball checks (the drawing layer)
 
-- [ ] The **dashed neckline** is visually distinguishable from the **solid**
-      pattern polyline.
-- [ ] Pattern and zone opacities are readable on Javier's dark chart theme —
-      `PatternOpacityPct` (40) and `ZoneOpacityPct` (10) are free to change,
-      they are cosmetic dials.
+- [ ] **No neckline is drawn** (Amendment 1). Only the swing polyline, the
+      flag's pole and rails, and the zone bands. A neckline segment appearing on
+      the chart means a stale build is loaded.
+- [ ] Pattern and zone opacities and the stroke weight are readable on Javier's
+      dark chart theme — `PatternOpacityPct` (65), `ZoneOpacityPct` (10) and
+      `PatternLineWidth` (4) are free to change, they are cosmetic dials.
 - [ ] **Zone bands are drawn once per session**, at the RTH open, and span the
       trading window. Bands repeating within one session, or missing at an
       open, is a real defect.
-- [ ] **Do not judge permission by band pixels.** The bands are drawn with the
-      ATR as it stood at the session open, while pattern permission is tested
-      with the ATR at the moment the pattern fires. The two differ, so a
-      permitted pattern can have its extreme marginally outside the drawn band
-      (or a pattern inside the band can still be refused). Judge permission by
-      the runbook rules and the rejected-pattern markers, not by the drawing.
+- [ ] **Do not judge permission by band pixels.** Two independent reasons, both
+      by design:
+      - The bands are drawn with the ATR as it stood at the session open, while
+        pattern permission is tested with the ATR at the moment the pattern
+        fires. The two differ.
+      - **The permission band is wider than the drawn band** (Amendment 1). The
+        drawing paints `ZoneHalfWidthAtr` (0.50 × ATR); permission uses
+        `ZoneHalfWidthAtr + ZoneProximityAtr` (1.00 × ATR at the defaults), so
+        an extreme sitting a full band-width outside the painted band can still
+        be permitted, on purpose.
+
+      Judge permission by the runbook rules and the rejected-pattern markers,
+      not by the drawing. To see the strict band on the chart instead, set
+      `ZoneProximityAtr = 0` — but that is a different strategy, not a display
+      option, so put it back before Phase 3.
 - [ ] No text anywhere on the chart. The design forbids labels, names and
       tables (spec decision #6).
 
@@ -222,13 +236,14 @@ design was shaped around are not evidence of an edge.
 
 Setup, all of it mandatory:
 
-- [ ] **Undo Phase 2 first.** Phase 2 told you to change values and NT8 keeps
-      them in the strategy template. Reset **`Contracts` → 1**,
-      **`TargetMultiple` → 1.0**, **`DailyLossLimitUsd` → 200**, then read the
-      **whole parameter grid** against the README's parameter table. A
-      leftover `TargetMultiple = 0.3` produces a complete, plausible, worthless
-      backtest, and the generic "defaults untouched" instruction below will not
-      catch it.
+- [ ] **Undo Phases 1 and 2 first.** Both told you to change values and NT8
+      keeps them in the strategy template. Reset **`Contracts` → 1**,
+      **`TargetMultiple` → 1.0**, **`DailyLossLimitUsd` → 200**,
+      **`ZoneProximityAtr` → 0.50** (Phase 1 may have zeroed it to eyeball the
+      strict band) and **`StopOffsetTicks` → 10**, then read the **whole
+      parameter grid** against the README's parameter table. A leftover
+      `TargetMultiple = 0.3` produces a complete, plausible, worthless backtest,
+      and the generic "defaults untouched" instruction below will not catch it.
 - [ ] Strategy Analyzer, MNQ, the **longest available 1-minute history**.
       (NQ substitution is allowed only as a documented fallback if MNQ history
       is short, with costs kept at MNQ scale — write it in the result log.)
@@ -261,13 +276,39 @@ Pre-registered. All seven must clear.
 
 Report alongside them, not gating but recorded: max drawdown (≤ ⅓ of annual
 net), Sortino (≥ 1.5), positive months (≥ 55%), and win rate against its
-breakeven. **On the breakeven:** at the minimum pattern height the geometry is
-reward ≈ 1.5×ATR against risk ≈ 2.0×ATR (height + the 0.5×ATR stop buffer), so
-breakeven sits near **57%** before costs — a floor, and a touch higher in
-practice, since entry sits past the neckline rather than on it, which shortens
-the target and lengthens the stop. It improves as patterns get taller. A
-win rate in the low 50s with these defaults is a losing strategy, not a
-marginal one.
+breakeven.
+
+**On the breakeven — recomputed for Amendment 1, and there is no longer one
+number.** The old derivation (reward 1.5×ATR against risk 2.0×ATR → 0.75R,
+breakeven 57%) came from a stop that was a pure ATR multiple of the pattern
+extreme. Amendment 1 anchors the stop on the pattern's **last defining swing**
+plus a **fixed 10 ticks** (2.5 MNQ points), which changes two things:
+
+- Risk is now `(neckline → last defining swing) + 2.5 points`. For a **double**
+  that is the full pattern height (the second top *is* the extreme); for a
+  **triple** it is up to `TopToleranceAtr` (0.30×ATR) less; for an **H&S** it is
+  at least `HeadProminenceAtr` (0.30×ATR) less, because the stop anchors the
+  right shoulder while the target is measured from the head.
+- Because the offset is a fixed tick distance and the height is ATR-scaled,
+  **R now depends on the prevailing ATR.** A single closed-form floor across all
+  pattern families no longer exists, and claiming one would be dishonest.
+
+At the minimum pattern height (`MinPatternHeightAtr` = 1.5), reward = 1.5×ATR
+and, writing A for ATR(1m) in points:
+
+| ATR(1m) | Double: R (breakeven) | H&S: R (breakeven) |
+|---|---|---|
+| 5 pts | 7.5 / 10.0 = **0.75R** (57.1%) | 7.5 / 8.5 = **0.88R** (53.1%) |
+| 10 pts | 15 / 17.5 = **0.86R** (53.8%) | 15 / 14.5 = **1.03R** (49.2%) |
+| 15 pts | 22.5 / 25.0 = **0.90R** (52.6%) | 22.5 / 20.5 = **1.10R** (47.7%) |
+
+**Use the double row at the ATR the backtest actually ran at as the reference
+case** — doubles are the worst geometry of the three and the most common
+pattern. Triples land between the two columns. Every number above is a floor
+that improves as patterns get taller, and is a touch optimistic in practice:
+entry sits past the neckline rather than on it, which shortens the target and
+lengthens the stop. Record the run's median ATR alongside the win rate, or the
+comparison is not interpretable.
 
 ### Red flags — too good is a defect, not a result
 
@@ -327,7 +368,8 @@ to fix during validation — they are decisions with reasons.
 | A position held **across a session open** loses the flag add-on for the rest of that trade | The session open resets the engine's per-session state and disarms the flag detector. A trade spanning that boundary keeps its brackets and exits normally; it just takes no more adds. |
 | **After a rejected add**, the engine takes no more adds for that trade | Fails safe. Re-arming the detector would need an anchor fill price the order layer never received, so the choice is between guessing and stopping. It stops. |
 | A **holiday or otherwise bar-less overnight** leaves the *previous* night's range standing as the overnight level, silently | Accepted residual. The overnight accumulators only roll over when overnight bars actually arrive, so a missing night inherits. Rare, and the failure direction is a stale level rather than a wrong one. |
-| `PatternOpacityPct` / `ZoneOpacityPct` are editable in the strategy dialog but **do not appear in the optimizer** | Deliberate. They are cosmetic dials; dropping `[NinjaScriptProperty]` takes them off the optimizable-parameter list while leaving them grid-editable. Nothing about how the chart looks should ever be searched over. |
+| `PatternOpacityPct` / `ZoneOpacityPct` / `PatternLineWidth` are editable in the strategy dialog but **do not appear in the optimizer** | Deliberate. They are cosmetic dials; dropping `[NinjaScriptProperty]` takes them off the optimizable-parameter list while leaving them grid-editable. Nothing about how the chart looks should ever be searched over. |
+| A pattern is permitted whose extreme sits **visibly outside** the drawn zone band | Amendment 1. Permission uses half-width + `ZoneProximityAtr` (1.00×ATR at the defaults); the drawing paints the half-width alone (0.50×ATR). Not a drawing bug and not a permission bug — the two were separated on purpose so near-the-level patterns qualify without fattening every painted band. |
 | Spec §7's flag condition that **net drift be flat or against the position** is not a separate check in the code | Deliberate, and recorded here pre-P&L so the frozen strategy is unambiguous. Drift is already bounded from both sides: the envelope cap (`FlagRangeMaxAtr` × ATR) caps how far the consolidation can travel, and the no-close-beyond-the-pole-extreme rule restarts the flag the moment price pushes on in favour. The frozen machine ships without the explicit test; adding one later is an amendment, not a fix. |
 
 ---

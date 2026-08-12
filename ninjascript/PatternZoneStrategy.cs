@@ -17,7 +17,7 @@
 //
 // ATR: PatternZoneCore.WilderAtr(14), hand-rolled and fed from OnBarUpdate —
 // nt8c cannot resolve the ATR() system wrapper (workspace gotcha) and the core's
-// recursion is the one the 109 unit tests pin. It crosses sessions and never
+// recursion is the one the 130 unit tests pin. It crosses sessions and never
 // resets, so `canTrade` also gates on 14 fed bars: the engine's internal
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
@@ -25,7 +25,8 @@
 // ORDERS: market entries, ONE aggregate stop + ONE aggregate target covering
 // every tranche (fromEntrySignal = "", live-until-cancelled, both legs always
 // resubmitted together), adds that re-price the stop only, a realized daily-loss
-// lockout and a window flatten. Drawing is still task 10 (HandleDraw is a no-op).
+// lockout and a window flatten. Drawing is pattern/flag geometry only — no
+// neckline, no text (Amendment 1 + spec decision #6).
 //
 // THE ORDER-EVENT RACE RULES THIS FILE. NT8 — Playback especially — can deliver
 // OnOrderUpdate/OnExecutionUpdate synchronously, in-stack, BEFORE the Enter*/
@@ -167,6 +168,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MinPatternHeightAtr = 1.5;
 
                 ZoneHalfWidthAtr = 0.50;
+                ZoneProximityAtr = 0.50;
                 UsePriorDayHL = true;
                 UseOvernightHL = true;
                 UsePriorClose = true;
@@ -174,6 +176,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 UseRound100 = true;
                 UseRound50 = false;
 
+                StopOffsetTicks = 10;
                 StopBufferAtr = 0.50;
                 TargetMultiple = 1.0;
 
@@ -196,8 +199,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 LongBrush = Brushes.MediumSeaGreen;
                 ShortBrush = Brushes.IndianRed;
                 AddonBrush = Brushes.Goldenrod;
-                PatternOpacityPct = 40;
+                PatternOpacityPct = 65;
                 ZoneOpacityPct = 10;
+                PatternLineWidth = 4;
                 DrawRejectedPatterns = false;
             }
             else if (State == State.DataLoaded)
@@ -212,12 +216,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                     TickSize = TickSize,                 // the instrument's, not a dial
                     MinPatternHeightAtr = MinPatternHeightAtr,
                     ZoneHalfWidthAtr = ZoneHalfWidthAtr,
+                    ZoneProximityAtr = ZoneProximityAtr,
                     UsePriorDayHL = UsePriorDayHL,
                     UseOvernightHL = UseOvernightHL,
                     UsePriorClose = UsePriorClose,
                     UseDayOpen = UseDayOpen,
                     UseRound100 = UseRound100,
                     UseRound50 = UseRound50,
+                    StopOffsetTicks = StopOffsetTicks,
                     StopBufferAtr = StopBufferAtr,
                     TargetMultiple = TargetMultiple,
                     EnableFlagAddon = EnableFlagAddon,
@@ -712,14 +718,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             switch (a.Type)
             {
                 case PzActionType.DrawPattern:
-                    DrawPattern(a.Pattern, a.NecklineAtBreak, PatternOpacityPct);
+                    DrawPattern(a.Pattern, PatternOpacityPct);
                     break;
                 case PzActionType.DrawRejected:
                     // Both direction slots can resolve on the same bar, so an
                     // entry and a rejection can land in the SAME action batch —
                     // handled independently, no exclusivity assumed here.
                     if (DrawRejectedPatterns)
-                        DrawPattern(a.Pattern, a.NecklineAtBreak, PatternOpacityPct / 2);
+                        DrawPattern(a.Pattern, PatternOpacityPct / 2);
                     break;
                 case PzActionType.DrawFlag:
                     DrawFlag(a.Flag);
@@ -727,16 +733,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        // One line per consecutive swing pair, plus a dashed neckline segment
-        // from its first point to the break bar's projection — the same geometry
-        // for an accepted pattern and a rejected one, just at half opacity.
+        // One line per consecutive swing pair — the M / W / 5-point zigzag, and
+        // nothing else. Same geometry for an accepted pattern and a rejected
+        // one, just at half opacity.
         //
-        // `necklineAtBreak` is the ENGINE's evaluation, carried on the action.
-        // Re-deriving it here as NecklineAt(CurrentBar) would mix index spaces:
-        // the engine counts its own bars from 0 and a Playback rewind rebuilds
-        // it while NT8's CurrentBar keeps climbing, which skews sloped necklines
-        // (H&S) by the whole offset between the two counters.
-        private void DrawPattern(PatternCandidate p, double necklineAtBreak, int opacityPct)
+        // Amendment 1: the dashed neckline segment is GONE (Javier does not want
+        // it on the chart). The engine still carries `NecklineAtBreak` on the
+        // action as the trigger price of record; the drawing layer ignores it.
+        private void DrawPattern(PatternCandidate p, int opacityPct)
         {
             int id = _patternSeq++;
             Brush brush = Alpha(p.IsShort ? ShortBrush : LongBrush, opacityPct);
@@ -744,11 +748,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             for (int i = 0; i < sw.Length - 1; i++)
                 Draw.Line(this, Tag("PZ_P" + id + "_" + i), false,
                     sw[i].Time, sw[i].Price, sw[i + 1].Time, sw[i + 1].Price,
-                    brush, DashStyleHelper.Solid, 2);
-
-            Draw.Line(this, Tag("PZ_P" + id + "_neck"), false,
-                p.NeckP1.Time, p.NeckP1.Price, Time[0], necklineAtBreak,
-                brush, DashStyleHelper.Dash, 2);
+                    brush, DashStyleHelper.Solid, PatternLineWidth);
         }
 
         // Pole line + the two flag-envelope rails. One-shot: fired once, at
@@ -760,13 +760,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             Brush brush = Alpha(AddonBrush, PatternOpacityPct);
             Draw.Line(this, Tag("PZ_F" + id + "_pole"), false,
                 f.PoleStartTime, f.PoleStartPrice, f.PoleEndTime, f.PoleEndPrice,
-                brush, DashStyleHelper.Solid, 2);
+                brush, DashStyleHelper.Solid, PatternLineWidth);
             Draw.Line(this, Tag("PZ_F" + id + "_hi"), false,
                 f.FlagStartTime, f.FlagHigh, Time[0], f.FlagHigh,
-                brush, DashStyleHelper.Solid, 2);
+                brush, DashStyleHelper.Solid, PatternLineWidth);
             Draw.Line(this, Tag("PZ_F" + id + "_lo"), false,
                 f.FlagStartTime, f.FlagLow, Time[0], f.FlagLow,
-                brush, DashStyleHelper.Solid, 2);
+                brush, DashStyleHelper.Solid, PatternLineWidth);
         }
 
         // Session S/R bands: drawn ONCE per session, right after OnSessionOpen,
@@ -1079,39 +1079,47 @@ namespace NinjaTrader.NinjaScript.Strategies
         public double MinPatternHeightAtr { get; set; }
 
         [NinjaScriptProperty, Range(0.1, 2.0)]
-        [Display(Name = "Zone half-width (x ATR)", Description = "Half-width of the band around a level. A pattern's extremes must cluster inside ONE band for the pattern to be permitted.", GroupName = "02. Zones", Order = 0)]
+        [Display(Name = "Zone half-width (x ATR)", Description = "Half-width of the band around a level, and the band DRAWN on the chart. A pattern's extremes must cluster inside one band (plus the proximity allowance below) for the pattern to be permitted.", GroupName = "02. Zones", Order = 0)]
         public double ZoneHalfWidthAtr { get; set; }
 
+        [NinjaScriptProperty, Range(0.0, 2.0)]
+        [Display(Name = "Zone proximity (x ATR)", Description = "Extra ATR margin beyond the zone band for pattern permission — a pattern forming NEAR a level still qualifies. Not drawn: permission reaches further than the band on the chart. 0 = strict band.", GroupName = "02. Zones", Order = 1)]
+        public double ZoneProximityAtr { get; set; }
+
         [NinjaScriptProperty]
-        [Display(Name = "Prior day high/low", GroupName = "02. Zones", Order = 1)]
+        [Display(Name = "Prior day high/low", GroupName = "02. Zones", Order = 2)]
         public bool UsePriorDayHL { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Overnight high/low", Description = "18:00-09:30 ET extremes. Requires an ETH session template — on an RTH chart these levels never exist.", GroupName = "02. Zones", Order = 2)]
+        [Display(Name = "Overnight high/low", Description = "18:00-09:30 ET extremes. Requires an ETH session template — on an RTH chart these levels never exist.", GroupName = "02. Zones", Order = 3)]
         public bool UseOvernightHL { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Prior RTH close", GroupName = "02. Zones", Order = 3)]
+        [Display(Name = "Prior RTH close", GroupName = "02. Zones", Order = 4)]
         public bool UsePriorClose { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Day open (09:30)", GroupName = "02. Zones", Order = 4)]
+        [Display(Name = "Day open (09:30)", GroupName = "02. Zones", Order = 5)]
         public bool UseDayOpen { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Round 100s", GroupName = "02. Zones", Order = 5)]
+        [Display(Name = "Round 100s", GroupName = "02. Zones", Order = 6)]
         public bool UseRound100 { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Round 50s", Description = "Off by default: on MNQ the 50s fire often enough to make the zone permission close to no filter at all.", GroupName = "02. Zones", Order = 6)]
+        [Display(Name = "Round 50s", Description = "Off by default: on MNQ the 50s fire often enough to make the zone permission close to no filter at all.", GroupName = "02. Zones", Order = 7)]
         public bool UseRound50 { get; set; }
 
+        [NinjaScriptProperty, Range(1, 200)]
+        [Display(Name = "Stop offset (ticks)", Description = "Entry stop, this far beyond the pattern's LAST defining swing extreme — the second top/bottom, the third extreme of a triple, or the right shoulder of a head & shoulders (not the head).", GroupName = "03. Entry", Order = 0)]
+        public int StopOffsetTicks { get; set; }
+
         [NinjaScriptProperty, Range(0.1, 3.0)]
-        [Display(Name = "Stop buffer (x ATR)", Description = "Stop beyond the pattern's extreme (entries) or beyond the flag (adds).", GroupName = "03. Entry", Order = 0)]
+        [Display(Name = "Stop buffer (x ATR)", Description = "Add-on only: after a flag add, the aggregate stop sits this far beyond the flag's far edge. Entry stops use the stop offset above.", GroupName = "03. Entry", Order = 1)]
         public double StopBufferAtr { get; set; }
 
         [NinjaScriptProperty, Range(0.3, 3.0)]
-        [Display(Name = "Target (x pattern height)", Description = "Measured move from the neckline, in pattern heights. Every tranche exits at this one price.", GroupName = "03. Entry", Order = 1)]
+        [Display(Name = "Target (x pattern height)", Description = "Measured move from the neckline, in pattern heights. Every tranche exits at this one price.", GroupName = "03. Entry", Order = 2)]
         public double TargetMultiple { get; set; }
 
         [NinjaScriptProperty]
@@ -1204,8 +1212,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Zone opacity (%)", GroupName = "06. Drawing", Order = 5)]
         public int ZoneOpacityPct { get; set; }
 
+        [Range(1, 10)]
+        [Display(Name = "Pattern line width", Description = "Stroke width of the pattern polyline and the flag's pole and rails.", GroupName = "06. Drawing", Order = 6)]
+        public int PatternLineWidth { get; set; }
+
         [NinjaScriptProperty]
-        [Display(Name = "Draw rejected patterns", Description = "Diagnostic: draw the patterns the permission gauntlet refused, with the reason. Noisy — off for real runs.", GroupName = "06. Drawing", Order = 6)]
+        [Display(Name = "Draw rejected patterns", Description = "Diagnostic: draw the patterns the permission gauntlet refused, with the reason. Noisy — off for real runs.", GroupName = "06. Drawing", Order = 7)]
         public bool DrawRejectedPatterns { get; set; }
         #endregion
     }

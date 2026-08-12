@@ -26,8 +26,13 @@ namespace PatternZoneCore
         public double TickSize = 0.25;
         public double MinPatternHeightAtr = 1.5;
         public double ZoneHalfWidthAtr = 0.50;
+        // Amendment 1: permission reaches this much FURTHER than the drawn band.
+        public double ZoneProximityAtr = 0.50;
         public bool UsePriorDayHL = true, UseOvernightHL = true, UsePriorClose = true, UseDayOpen = true, UseRound100 = true, UseRound50 = false;
+        // Add-on aggregate stop only (flag far edge). The ENTRY stop is
+        // StopOffsetTicks beyond the pattern's last defining swing — Amendment 1.
         public double StopBufferAtr = 0.50;
+        public int StopOffsetTicks = 10;
         public double TargetMultiple = 1.0;
         public bool EnableFlagAddon = true;
         public double PoleMinAtr = 2.0;
@@ -201,7 +206,11 @@ namespace PatternZoneCore
 
         public bool Permits(PatternCandidate p, double atr, out double zoneLevel)
         {
-            double hw = _cfg.ZoneHalfWidthAtr * atr;
+            // Amendment 1: the PERMISSION band is half-width + proximity, wider
+            // than the band the shell draws (half-width alone). Deliberate — a
+            // pattern that forms just outside a level still qualifies, so an
+            // extreme can sit visibly outside the drawn band and still trade.
+            double hw = (_cfg.ZoneHalfWidthAtr + _cfg.ZoneProximityAtr) * atr;
             int required = RequiredCount(p.Kind);
 
             foreach (double level in CandidateLevels(p.ZoneExtremes[0]))
@@ -551,11 +560,11 @@ namespace PatternZoneCore
         public double StopPrice, TargetPrice;    // Enter*: initial bracket. Add*: StopPrice = new AGGREGATE stop.
         public PatternCandidate Pattern;         // Enter* + DrawPattern + DrawRejected
         public FlagInfo Flag;                    // Add* + DrawFlag
-        // The neckline evaluated at the BREAK bar, carried out with the action
-        // because it is in ENGINE index space. The shell counts bars separately
-        // (a Playback rewind rebuilds the engine from bar 0 while NT8's
-        // CurrentBar keeps climbing), so re-evaluating NecklineAt(CurrentBar)
-        // chart-side skews every sloped neckline it draws.
+        // The neckline evaluated at the BREAK bar, in ENGINE index space (the
+        // shell counts bars separately: a Playback rewind rebuilds the engine
+        // from bar 0 while NT8's CurrentBar keeps climbing).
+        // Amendment 1: the drawing layer no longer consumes this — the neckline
+        // is not drawn. Kept because it is the trigger price of record.
         public double NecklineAtBreak;
         // DrawRejected: "zone" | "height" | "busy" | "session_cap" | "flag_no_position".
         // The last one is unreachable here by construction (spec §7/rule 8: the
@@ -799,11 +808,18 @@ namespace PatternZoneCore
             }
 
             int dirSign = c.IsShort ? -1 : 1;
+            // Amendment 1 (Javier, pre-P&L): the stop anchors the pattern's LAST
+            // defining swing, not its extreme. By construction that swing is
+            // always the last EXTREME — second top/bottom, third extreme of a
+            // triple, and the RIGHT SHOULDER of an H&S, deliberately not the
+            // head: the head is what invalidates the candidate, the shoulder is
+            // what the break has to hold. Fixed tick distance, not ATR-scaled.
+            double stopAnchor = c.Swings[c.Swings.Length - 1].Price;
             actions.Add(new PzAction
             {
                 Type = c.IsShort ? PzActionType.EnterShort : PzActionType.EnterLong,
                 Pattern = c,
-                StopPrice = c.ExtremePrice - dirSign * _cfg.StopBufferAtr * atr,
+                StopPrice = stopAnchor - dirSign * _cfg.StopOffsetTicks * _cfg.TickSize,
                 TargetPrice = neckline + dirSign * height * _cfg.TargetMultiple,
                 NecklineAtBreak = neckline,
             });

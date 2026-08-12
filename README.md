@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/edge-not%20measured-lightgrey?style=flat-square" alt="edge: not measured">
   <img src="https://img.shields.io/badge/platform-NinjaTrader%208-1f6feb?style=flat-square" alt="platform: NinjaTrader 8">
   <img src="https://img.shields.io/badge/instrument-MNQ%201m-f7931a?style=flat-square" alt="instrument: MNQ 1-minute">
-  <img src="https://img.shields.io/badge/tests-121%20passing-brightgreen?style=flat-square" alt="tests: 121 passing">
+  <img src="https://img.shields.io/badge/tests-130%20passing-brightgreen?style=flat-square" alt="tests: 130 passing">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
@@ -38,7 +38,7 @@ Nothing on this page is a claim about profitability.
 
 | Phase | What it establishes | Status |
 |---|---|---|
-| Unit tests | The detection and decision core behaves as specified | **121 passing** |
+| Unit tests | The detection and decision core behaves as specified | **130 passing** |
 | 1 — Visual QA | The detector sees the patterns a human sees | Pending |
 | 2 — Order-layer exercises | The order plumbing survives the events that break NT8 strategies | Pending |
 | 3 — Frozen backtest | Whether there is anything here at all | Not run |
@@ -91,27 +91,38 @@ closes beyond the neckline by at least 2 ticks; entry is at market on the next
 bar's open. Top-family patterns go short, bottom-family long.
 
 **Permission — the thesis.** Before a fired pattern becomes a trade, its
-extremes must sit inside one zone band, defined as a level ± 0.5 × ATR(14):
+extremes must sit inside one band around a level — the level ± 0.5 × ATR(14),
+plus another 0.5 × ATR of proximity allowance:
 
 - Both tops of a double, at least 2 of 3 extremes of a triple, or the head of a
   head-and-shoulders.
 - Levels: prior-day high/low, overnight high/low, prior RTH close, day open,
   round 100s. Round 50s exist as a toggle and are **off** — on MNQ they fire
   often enough to make the permission close to no filter at all.
+- The band **drawn** on the chart is the half-width only. Permission reaches
+  the proximity allowance further, so an extreme can sit outside the painted
+  band and still qualify. That gap is deliberate, not a rendering bug.
 
 A pattern that fires away from every level is drawn (with
 `DrawRejectedPatterns`) and never traded.
 
-**Stop and target.** Stop at the pattern's extreme ± 0.5 × ATR. Target is the
-classic measured move: the pattern height projected from the break point, ×1.0.
-Patterns shorter than 1.5 × ATR are rejected as noise — which also guarantees
-the stop is wider than one ATR, since stops below that are noise-stopped by
-construction on this instrument.
+**Stop and target.** The stop sits 10 ticks beyond the pattern's **last
+defining swing** — the second top or bottom, the third extreme of a triple, or
+the **right shoulder** of a head-and-shoulders. Not the head: the head is what
+invalidates the pattern while it is still forming, but the right shoulder is the
+level the breakdown has to hold, and anchoring there makes an H&S stop
+materially tighter than the geometry it targets. Target is the classic measured
+move: the pattern height projected from the break point, ×1.0. Patterns shorter
+than 1.5 × ATR are rejected as noise.
 
-Worth stating plainly: at the minimum pattern height this risks more than it
-makes. Reward is 1.5 × ATR against risk of 2.0 × ATR once the stop buffer is
-added — **0.75R at the default target multiple**, so breakeven sits near 57%
-before costs. Taller patterns improve the ratio; the floor does not.
+Worth stating plainly: near the minimum pattern height this can risk more than
+it makes, and **how much more depends on the ATR**, because the stop offset is a
+fixed tick distance while the height is ATR-scaled. At ATR(1m) = 5 points a
+minimum-height double is 0.75R (breakeven ≈ 57%); at ATR = 10 it is 0.86R
+(≈ 54%). Head-and-shoulders is better on both counts — around 1.03R at ATR = 10
+— because its stop anchors the shoulder while its target is measured from the
+head. There is no single R floor across the pattern families any more; the full
+table is in [`docs/validation.md`](docs/validation.md).
 
 **Adds — continuation patterns, never standalone.** While a position is open, a
 bull or bear flag can add one tranche: a pole of ≥ 2 × ATR within 8 bars of the
@@ -126,9 +137,9 @@ position does nothing at all.
 the next RTH open. Forced flat at 15:55 ET.
 
 **On the chart.** Every traded pattern draws its own geometry over the candles —
-the M or W polyline, a dashed neckline, the flag's pole and rails, faint zone
-bands. Semi-transparent, and no text anywhere: the chart shows *why* it entered
-without becoming a dashboard.
+the M or W polyline, the flag's pole and rails, faint zone bands. No neckline
+(it was drawn in the first build and taken out after looking at it), and no text
+anywhere: the chart shows *why* it entered without becoming a dashboard.
 
 ## Install
 
@@ -160,21 +171,25 @@ The first trade is possible on the 15th bar (ATR warmup).
 
 **Statistical dials — frozen.** These were fixed before any P&L was seen.
 Changing one is a pre-registered amendment that earns its own out-of-sample run,
-not a tweak.
+not a tweak. One amendment has been made so far — the stop rule and the zone
+proximity allowance, on 2026-08-12, from watching the detector draw and still
+with no P&L in existence. It is written up in
+[`docs/design.md`](docs/design.md#amendments).
 
 | Group | Parameters | Defaults |
 |---|---|---|
 | Detection | Swing strength · top tolerance · head prominence · max pattern span · neckline break · min pattern height | 3 · 0.30 ATR · 0.30 ATR · 60 bars · 2 ticks · 1.5 ATR |
-| Zones | Zone half-width · six level toggles | 0.50 ATR · all on except round 50s |
-| Entry | Stop buffer · target multiple | 0.50 ATR · 1.0 × height |
+| Zones | Zone half-width · zone proximity · six level toggles | 0.50 ATR · 0.50 ATR · all on except round 50s |
+| Entry | Stop offset · stop buffer (add-on stop only) · target multiple | 10 ticks · 0.50 ATR · 1.0 × height |
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |
 | Risk | Contracts · max trades/session · window · daily loss limit | 1 · 3 · 09:30–15:55 ET · $200 |
 
 **Cosmetic dials — free.** Zone drawing, the three brushes, pattern and zone
-opacity, and rejected-pattern drawing can be changed at any time without
-touching the pre-registration. The two opacity dials are adjustable in the
-strategy dialog but **deliberately excluded from the optimizer** — nothing about
-how the chart looks should ever be searched over.
+opacity (65% and 10%), pattern line width (4), and rejected-pattern drawing can
+be changed at any time without touching the pre-registration. The two opacity
+dials and the line width are adjustable in the strategy dialog but
+**deliberately excluded from the optimizer** — nothing about how the chart looks
+should ever be searched over.
 
 The ATR period (14) is not a parameter. It is pinned by the unit tests to cap
 degrees of freedom.

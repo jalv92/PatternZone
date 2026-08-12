@@ -180,6 +180,19 @@ namespace PatternZone.Tests
             108.55, 108.7, 108.9, 109.2, 109.0, 108.6, 107.9, 106.8
         };
 
+        // H&S into a head at 111.0, sloped neckline. Left shoulder high 110.0
+        // (bar 5, confirms 7), valley low 105.0 (bar 8), head high 111.0 (bar
+        // 11), valley low 106.0 (bar 14), right shoulder high 110.3 (bar 16,
+        // confirms 18 -> arms). The head clears both shoulders by >= 0.7, which
+        // also puts |e1 - e2| past TopToleranceAtr*atr (0.6) so the triple
+        // scanner declines and the H&S is what arms. Neckline runs (8, 105) ->
+        // (14, 106): at bar 19 it is 106.833, and 105.5 <= 106.833 - 0.5 breaks
+        // it. Head 111.0 sits 1.0 from PDH 110.0, inside the permission band.
+        static readonly double[] HsAt111 = {
+            100, 102, 104, 106, 108, 109, 108.2, 107, 106, 107.2,
+            108.4, 110, 109, 108, 107, 108, 109.3, 108, 106.5, 105.5
+        };
+
         static double[] Shift(double[] closes, double delta)
         {
             var r = new double[closes.Length];
@@ -252,7 +265,9 @@ namespace PatternZone.Tests
             T.Check(ent.Pattern != null && ent.Pattern.IsShort, "action carries pattern");
             T.Check(ent.StopPrice > ent.Pattern.ExtremePrice, "stop beyond extreme");
             T.Check(ent.TargetPrice < ent.Pattern.NecklineAt(_bar), "target below neckline");
-            T.CheckClose(ent.StopPrice, 111.2, "stop = extreme + StopBufferAtr*atr");
+            // Amendment 1: last defining swing (the second top, 110.2) plus
+            // StopOffsetTicks*TickSize (10 * 0.25). NOT StopBufferAtr any more.
+            T.CheckClose(ent.StopPrice, 112.7, "stop = last swing + StopOffsetTicks");
             T.CheckClose(ent.TargetPrice, 89.8, "target = neckline - height*TargetMultiple");
             // The break-bar neckline rides on the action: the drawing layer must
             // never re-derive it from its own bar counter (different index space).
@@ -454,6 +469,25 @@ namespace PatternZone.Tests
                 new PzSwing { BarIndex = 20, Price = 98.4, IsHigh = false },
                 new PzSwing { BarIndex = 25, Price = 110.2, IsHigh = true } };
             T.Check(PatternScanner.TryDouble(reformed, cfgCons, 2.0) != null, "the re-formed tail IS a double top");
+
+            // --- Amendment 1, the case where the new stop rule differs most:
+            // for an H&S the last defining swing is the RIGHT SHOULDER, so the
+            // stop anchors 110.3 and not the head at 111.0. The head keeps its
+            // other job — it is still ExtremePrice, what invalidates the
+            // candidate — which is why both are asserted here.
+            var eHs = Fresh(new PzConfig { SwingStrength = 2 });
+            PzAction hsEnt = Find(Wander(eHs, HsAt111), PzActionType.EnterShort);
+            T.Check(hsEnt != null && hsEnt.Pattern.Kind == PatternKind.HeadShoulders, "H&S enters short");
+            T.CheckClose(hsEnt.Pattern.ExtremePrice, 111.0, "H&S extreme is still the head");
+            T.CheckClose(hsEnt.StopPrice, 112.8, "H&S stop = right shoulder + StopOffsetTicks");
+            T.Check(hsEnt.StopPrice < 111.0 + 10 * 0.25, "H&S stop is tighter than a head-anchored one");
+
+            // --- StopOffsetTicks is read, not baked in: the same M at 20 ticks
+            // puts the stop at 110.2 + 5.0 instead of 110.2 + 2.5.
+            var eOff = Fresh(new PzConfig { SwingStrength = 2, StopOffsetTicks = 20 });
+            PzAction offEnt = Find(Wander(eOff, MAt110), PzActionType.EnterShort);
+            T.Check(offEnt != null, "a wider stop offset still enters");
+            T.CheckClose(offEnt.StopPrice, 115.2, "stop tracks StopOffsetTicks");
         }
     }
 
@@ -476,9 +510,20 @@ namespace PatternZone.Tests
             T.Check(z.Permits(dt, atr, out lvl), "DT at PDH permitted");
             T.CheckClose(lvl, 110.1, "zone level = PDH");
 
-            // Both tops must share ONE band: 110 fits PDH band, 108.5 fits nothing.
-            var dt2 = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 108.5 }, ExtremePrice = 110.0 };
+            // Both tops must share ONE band: 110 fits the PDH band, 107 fits
+            // nothing (3.1 away, past half-width + proximity = 2.0 at this ATR).
+            var dt2 = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 107.0 }, ExtremePrice = 110.0 };
             T.Check(!z.Permits(dt2, atr, out lvl), "split tops rejected");
+
+            // Amendment 1 — the proximity allowance, asserted in BOTH directions.
+            // These tops sit 1.4 and 1.5 from PDH 110.1: outside the drawn band
+            // (half-width 1.0) but inside the permission band (2.0).
+            var near = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 108.7, 108.6 }, ExtremePrice = 108.7 };
+            T.Check(z.Permits(near, atr, out lvl), "near-band tops permitted by the proximity allowance");
+            T.CheckClose(lvl, 110.1, "proximity permission still reports the PDH");
+            cfg.ZoneProximityAtr = 0.0;
+            T.Check(!z.Permits(near, atr, out lvl), "proximity 0 = strict band, same tops refused");
+            cfg.ZoneProximityAtr = 0.50;                    // restore: cfg is shared below
 
             // Round-100: extremes near 30000 permitted with no session level nearby.
             var z2 = new ZoneEngine(cfg);
