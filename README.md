@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/edge-not%20measured-lightgrey?style=flat-square" alt="edge: not measured">
   <img src="https://img.shields.io/badge/platform-NinjaTrader%208-1f6feb?style=flat-square" alt="platform: NinjaTrader 8">
   <img src="https://img.shields.io/badge/instrument-MNQ%201m-f7931a?style=flat-square" alt="instrument: MNQ 1-minute">
-  <img src="https://img.shields.io/badge/tests-135%20passing-brightgreen?style=flat-square" alt="tests: 135 passing">
+  <img src="https://img.shields.io/badge/tests-137%20passing-brightgreen?style=flat-square" alt="tests: 137 passing">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
@@ -38,7 +38,7 @@ Nothing on this page is a claim about profitability.
 
 | Phase | What it establishes | Status |
 |---|---|---|
-| Unit tests | The detection and decision core behaves as specified | **135 passing** |
+| Unit tests | The detection and decision core behaves as specified | **137 passing** |
 | 1 — Visual QA | The detector sees the patterns a human sees | Pending |
 | 2 — Order-layer exercises | The order plumbing survives the events that break NT8 strategies | Pending |
 | 3 — Frozen backtest | Whether there is anything here at all | Not run |
@@ -111,8 +111,8 @@ plus another 0.5 × ATR of proximity allowance:
 
 A pattern that fires away from every level is drawn (with
 `DrawRejectedPatterns`) and never traded. With that switch on, every refusal
-also prints its reason — `busy`, `session_cap`, `height`, `trend` or `zone` — to
-the Output window, since the chart deliberately carries no text.
+also prints its reason — `busy`, `session_cap`, `height`, `trend`, `zone` or
+`stop` — to the Output window, since the chart deliberately carries no text.
 
 **Stop and target.** The stop sits 10 ticks beyond the pattern's **last
 defining swing** — the second top or bottom, the third extreme of a triple, or

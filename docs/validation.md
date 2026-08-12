@@ -90,9 +90,11 @@ Run once per must-pass episode.
       drawn faintly on the chart **and** each one prints its reason to the
       **Output window** (`REJECTED <reason> <pattern kind>`). The chart itself
       still carries no text, so the Output window is where the WHY lives. The
-      vocabulary is `busy` / `session_cap` / `height` / `trend` / `zone`, and it
-      is evaluated in that order — a pattern that fails two gates reports the
-      first one only.
+      vocabulary is `busy` / `session_cap` / `height` / `trend` / `zone` /
+      `stop`, and it is evaluated in that order — a pattern that fails two gates
+      reports the first one only. `stop` is the rarest and the most interesting:
+      a sloped neckline outran the pattern's own right shoulder, so the stop
+      would have landed on the wrong side of the entry.
 - [ ] **3. Replay** — Market Replay through the episode at a speed where you
       can watch the bars close.
 - [ ] **4. Screenshot** — capture the chart at the moment the pattern is
@@ -299,8 +301,11 @@ extreme. Amendment 1 anchors the stop on the pattern's **last defining swing**
 plus a **fixed 10 ticks** (2.5 MNQ points), which changes two things:
 
 - Risk is now `(neckline → last defining swing) + 2.5 points`. For a **double**
-  that is the full pattern height (the second top *is* the extreme); for a
-  **triple** it is up to `TopToleranceAtr` (0.30×ATR) less; for an **H&S** it is
+  that is the full pattern height only when the second top is the higher of the
+  two; when the first top is higher it is up to `TopToleranceAtr` (0.30×ATR)
+  less, so the table below is a conservative floor for doubles rather than an
+  exact figure. For a **triple** it is up to the same tolerance less; for an
+  **H&S** it is
   at least `HeadProminenceAtr` (0.30×ATR) less, because the stop anchors the
   right shoulder while the target is measured from the head.
 - Because the offset is a fixed tick distance and the height is ATR-scaled,

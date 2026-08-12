@@ -572,7 +572,7 @@ namespace PatternZoneCore
         // Amendment 1: the drawing layer no longer consumes this — the neckline
         // is not drawn. Kept because it is the trigger price of record.
         public double NecklineAtBreak;
-        // DrawRejected: "zone" | "height" | "trend" | "busy" | "session_cap" | "flag_no_position".
+        // DrawRejected: "zone" | "height" | "trend" | "stop" | "busy" | "session_cap" | "flag_no_position".
         // The last one is unreachable here by construction (spec §7/rule 8: the
         // flag detector is only ever armed while in position), so no branch
         // below emits it — it stays in the shell's vocabulary, not the engine's.
@@ -589,11 +589,12 @@ namespace PatternZoneCore
 
         private const int MaxRetainedSwings = 40;
         // Amendment 2: recent bar extremes, keyed by bar index, for the
-        // prior-trend window. ponytail: 512 covers the default lookback (60)
-        // plus the widest pattern span several times over; a window that starts
-        // before the ring is treated as unevaluable and PASSES, the same way
-        // short history does — the gate never fails on missing data. Raise this
-        // if TrendLookbackBars + MaxPatternBars ever approaches it.
+        // prior-trend window. ponytail: the window anchors on the first defining
+        // swing and reaches BACKWARD, so the binding constraint is just
+        // TrendLookbackBars + 1 <= 512 — comfortably true at the Range(10, 500)
+        // ceiling. A first swing older than the ring is treated as unevaluable
+        // and PASSES, the same way short history does: the gate never fails on
+        // missing data.
         private const int TrendRingSize = 512;
 
         private readonly PzConfig _cfg;
@@ -868,11 +869,22 @@ namespace PatternZoneCore
             // head: the head is what invalidates the candidate, the shoulder is
             // what the break has to hold. Fixed tick distance, not ATR-scaled.
             double stopAnchor = c.Swings[c.Swings.Length - 1].Price;
+            double stopPrice = stopAnchor - dirSign * _cfg.StopOffsetTicks * _cfg.TickSize;
+            // A sloped neckline extrapolates: on an H&S it can climb past the
+            // right shoulder by the time the break lands, which puts the stop on
+            // the WRONG side of the entry — an inverted bracket. Reject rather
+            // than re-anchor: a break priced beyond the pattern's own right
+            // shoulder is not the setup any more.
+            if (dirSign * (stopPrice - bar.Close) >= 0)
+            {
+                actions.Add(Reject(c, "stop", neckline));
+                return;
+            }
             actions.Add(new PzAction
             {
                 Type = c.IsShort ? PzActionType.EnterShort : PzActionType.EnterLong,
                 Pattern = c,
-                StopPrice = stopAnchor - dirSign * _cfg.StopOffsetTicks * _cfg.TickSize,
+                StopPrice = stopPrice,
                 TargetPrice = neckline + dirSign * height * _cfg.TargetMultiple,
                 NecklineAtBreak = neckline,
             });

@@ -17,7 +17,7 @@
 //
 // ATR: PatternZoneCore.WilderAtr(14), hand-rolled and fed from OnBarUpdate —
 // nt8c cannot resolve the ATR() system wrapper (workspace gotcha) and the core's
-// recursion is the one the 135 unit tests pin. It crosses sessions and never
+// recursion is the one the 137 unit tests pin. It crosses sessions and never
 // resets, so `canTrade` also gates on 14 fed bars: the engine's internal
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
@@ -722,10 +722,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             // instead — ahead of the ChartControl guard, so a headless Analyzer
             // run can be audited too, and behind the same toggle so a real run
             // stays silent.
+            // a.Pattern is null-guarded: the reserved "flag_no_position" reason
+            // carries a flag, not a pattern, and no engine branch emits it today.
             if (a.Type == PzActionType.DrawRejected && DrawRejectedPatterns)
                 Print(string.Format(CultureInfo.InvariantCulture,
                     "{0} {1:yyyy-MM-dd HH:mm} REJECTED {2} {3}",
-                    Name, Time[0], a.RejectReason, a.Pattern.Kind));
+                    Name, Time[0], a.RejectReason,
+                    a.Pattern != null ? a.Pattern.Kind.ToString() : "flag"));
 
             if (ChartControl == null)              // headless Strategy Analyzer: never draw
                 return;
@@ -1224,9 +1227,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         // constructor-param inclusion and optimizer/walk-forward eligibility,
         // NOT grid visibility (that's [Browsable]+[Display] — see LongBrush
         // above, which is grid-editable with no [NinjaScriptProperty] either).
-        // Dropping it here only takes these two off the optimizable-parameter
-        // list; they stay editable in the strategy dialog and persist via
-        // standard serialization.
+        // Dropping it here only takes the three cosmetic dials below (both
+        // opacities and the line width) off the optimizable-parameter list;
+        // they stay editable in the strategy dialog and persist via standard
+        // serialization.
         [Range(5, 100)]
         [Display(Name = "Pattern opacity (%)", GroupName = "06. Drawing", Order = 4)]
         public int PatternOpacityPct { get; set; }

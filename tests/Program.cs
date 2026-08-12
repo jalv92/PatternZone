@@ -462,14 +462,7 @@ namespace PatternZone.Tests
             // and the triple off it is valid too; both are refused only because
             // the traded pattern's swings are consumed. Nothing arms, so no
             // second entry is reachable.
-            // UseTrendFilter off, and this one is subtle: the fixture passes
-            // either way, but only with the gate off does it still FAIL when
-            // the consumed marks break. The re-formed tail arms a TRIPLE whose
-            // first extreme (110.0) is beaten by the traded M's 110.2 inside
-            // the window, so with the gate on a consumed-swings regression
-            // would surface as a "trend" rejection instead of the entry these
-            // assertions look for — the pin would quietly stop carrying itself.
-            var cfgCons = new PzConfig { SwingStrength = 2, UseTrendFilter = false };
+            var cfgCons = new PzConfig { SwingStrength = 2 };
             var eCons = Fresh(cfgCons);
             var consFirst = Wander(eCons, MAt110);
             T.Check(Find(consFirst, PzActionType.EnterShort) != null, "the M trades once");
@@ -536,6 +529,33 @@ namespace PatternZone.Tests
             var bothActs = Wander(eBoth, Shift(MAt110, -4));
             T.Check(Rejected(bothActs, "trend") != null, "trend beats zone in the rejection order");
             T.Check(Rejected(bothActs, "zone") == null, "one pattern reports exactly one reason");
+
+            // --- Wrong-side stop on a rising neckline (the review's C1). The
+            // H&S neckline runs (8, 100) -> (17, 105) and keeps climbing: by
+            // the break at bar 36 it is 115.556, so the close 115.0 sits ABOVE
+            // the right shoulder (110.5) and its stop (113.0). Shorting there
+            // would submit a stop BELOW the entry — an inverted bracket. The
+            // pattern is refused instead: a break priced past its own right
+            // shoulder is not the setup. PDH 130 puts the head on a zone, so
+            // nothing upstream of the stop guard can be what rejects it.
+            var eStop = Fresh(new PzConfig { SwingStrength = 2 });
+            eStop.OnSessionOpen(new SessionLevels { PriorDayHigh = 130.0 });
+            var stopActs = Wander(eStop,
+                95, 97, 99, 101, 103,
+                109,                                   // b5  left shoulder high 110.0
+                105, 102,
+                101,                                   // b8  valley low 100.0
+                104, 112, 118, 124,
+                129,                                   // b13 head high 130.0
+                122, 116, 110,
+                106,                                   // b17 valley low 105.0
+                108,
+                109.5,                                 // b19 right shoulder high 110.5
+                108.5, 108.0, 108.6, 109.0, 109.6, 110.2, 110.8, 111.4, 112.0, 112.6,
+                113.2, 113.8, 114.4, 115.0, 115.6, 116.2,
+                115.0);                                // b36 breaks a neckline that outran the shoulder
+            T.Check(Find(stopActs, PzActionType.EnterShort) == null, "no short with the stop on the wrong side");
+            T.Check(Rejected(stopActs, "stop") != null, "wrong-side stop rejection");
         }
     }
 
@@ -588,7 +608,10 @@ namespace PatternZone.Tests
             cfg.UseRound50 = false;
 
             // Triple: 2 of 3 suffice. H&S: head only.
-            var tt = new PatternCandidate { Kind = PatternKind.TripleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 110.4, 108.0 }, ExtremePrice = 110.4 };
+            // The third extreme sits 3.1 from PDH 110.1 — well past half-width +
+            // proximity (2.0), so this stays a 2-of-3 test if the allowance is
+            // ever widened again rather than silently becoming 3-of-3.
+            var tt = new PatternCandidate { Kind = PatternKind.TripleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 110.4, 107.0 }, ExtremePrice = 110.4 };
             T.Check(z.Permits(tt, atr, out lvl), "triple 2-of-3 permitted");
             var hs = new PatternCandidate { Kind = PatternKind.HeadShoulders, IsShort = true, ZoneExtremes = new[] { 110.5 }, ExtremePrice = 110.5 };
             T.Check(z.Permits(hs, atr, out lvl), "HS head permitted");

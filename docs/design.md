@@ -239,11 +239,18 @@ tuning preference, which is why it is fixed rather than left for a later run.
    Ties pass (the swing is itself a bar in the window). The window clamps to the
    history actually available, so a short history never auto-rejects.
    The `Fire` gauntlet order is now, and is pinned as:
-   **busy → canTrade (silent) → session_cap → height → trend → zone**, so a
-   pattern with no trend behind it reports `"trend"` even when it is also off
-   its zone.
+   **busy → canTrade (silent) → session_cap → height → trend → zone → stop**,
+   so a pattern with no trend behind it reports `"trend"` even when it is also
+   off its zone.
 6. **Rejection reasons became observable.** The chart carries no text by design
    (decision #6), which left the whole gauntlet unauditable in Replay. When
    `DrawRejectedPatterns` is on, each rejection now also prints one line — time,
    `REJECTED`, reason, pattern kind — to the **Output window**. The
    no-text-on-chart rule is untouched.
+7. **Wrong-side stops are refused** (`"stop"`, added in review). A sloped H&S
+   neckline keeps extrapolating: by the time the break lands it can sit *above*
+   the right shoulder plus the offset, which would submit a short whose stop is
+   BELOW its entry — an inverted bracket. The engine now checks the computed
+   stop against the break close and rejects when it is not beyond the entry on
+   the adverse side. Rejected, not re-anchored: a break priced past the
+   pattern's own right shoulder is no longer the setup being traded.
