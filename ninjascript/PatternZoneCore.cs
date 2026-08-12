@@ -426,6 +426,16 @@ namespace PatternZoneCore
                 _extremeTime = bar.Time;
                 return null;
             }
+            // ponytail: an all-extension run (no pullback bar) would otherwise
+            // leave extremeBar - anchorBar growing past PoleMaxBars forever,
+            // orphaning the detector since PoleExists() could never pass again.
+            // Mirror the flag side's re-anchor-on-overrun; a too-small move
+            // that's still within budget just keeps waiting.
+            if (_extremeBar - _anchorBar > _cfg.PoleMaxBars)
+            {
+                Reanchor(bar, barIndex);
+                return null;
+            }
             if (!PoleExists(atr))
                 return null;
 

@@ -227,6 +227,42 @@ namespace PatternZone.Tests
             foreach (var b in new[] { B(100,102,100,102), B(102,104,102,104), B(104,105,103.5,104.8),
                                       B(104.8,105,101,101.5), B(101.5,104.9,101,104.6), B(104.6,104.9,104,104.2) })
                 T.Check(fd2.Update(b, bar++, atr) == null, "wide flag never triggers " + bar);
+
+            // Orphan guard: an all-extension run past PoleMaxBars (8) with no
+            // pullback bar must not get the detector stuck once the first
+            // pullback finally arrives.
+            var fd3 = new FlagDetector(cfg);
+            fd3.Arm(1, 100.0, 0); bar = 1;
+            for (int i = 1; i <= 10; i++)
+            {
+                double h = 100 + i;
+                T.Check(fd3.Update(B(h - 1, h, h - 2, h - 0.5), bar++, atr) == null, "no trigger during overrun climb " + bar);
+            }
+            // extremeBar(10) - anchorBar(0) = 10 > PoleMaxBars(8) -> re-anchor
+            // here instead of orphaning (PoleExists() could never pass again).
+            got = fd3.Update(B(108, 109, 107.5, 108.0), bar++, atr);
+            T.Check(got == null, "overrun pullback re-anchors, no trigger");
+
+            // Fresh pole (108 -> 112, move 4 >= 4) + 3-bar flag + breakout
+            // from the NEW anchor (bar 11) proves recovery, not orphaning.
+            got = fd3.Update(B(108, 110, 108, 109.5), bar++, atr);
+            T.Check(got == null, "new pole building 1");
+            got = fd3.Update(B(109.5, 112, 109, 111.5), bar++, atr);
+            T.Check(got == null, "new pole building 2");
+            got = fd3.Update(B(111.5, 111.9, 111.0, 111.5), bar++, atr);
+            T.Check(got == null, "new flag bar 1");
+            got = fd3.Update(B(111.5, 111.8, 110.8, 111.2), bar++, atr);
+            T.Check(got == null, "new flag bar 2");
+            got = fd3.Update(B(111.2, 111.7, 110.9, 111.3), bar++, atr);
+            T.Check(got == null, "new flag bar 3");
+            got = fd3.Update(B(111.3, 112.5, 111.2, 112.3), bar++, atr);
+            T.Check(got != null, "new pole breakout triggers after orphan-guard recovery");
+            T.CheckClose(got.PoleStartPrice, 108.0, "new pole start price");
+            T.CheckClose(got.PoleEndPrice, 112.0, "new pole end price");
+            T.Check(got.PoleStartBar == 11, "new pole start bar");
+            T.Check(got.PoleEndBar == 13, "new pole end bar");
+            T.CheckClose(got.FlagHigh, 111.9, "new flag high");
+            T.CheckClose(got.FlagLow, 110.8, "new flag low");
         }
     }
 }
