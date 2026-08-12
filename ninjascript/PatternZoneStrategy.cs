@@ -22,11 +22,17 @@
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
 //
-// ORDERS ARE OFF IN THIS FILE'S CURRENT STATE. Every engine action is Print()ed
-// and nothing is submitted; the order layer is task 9 and the drawing layer
-// task 10. The engine's fill callbacks (OnEntryFilled/OnAddFilled/OnEntryFailed/
-// OnAddFailed/OnPositionClosed) are therefore never called yet — the engine
-// stays in AwaitingEntryFill after the first entry action by design.
+// ORDERS: market entries, ONE aggregate stop + ONE aggregate target covering
+// every tranche (fromEntrySignal = "", live-until-cancelled, both legs always
+// resubmitted together), adds that re-price the stop only, a realized daily-loss
+// lockout and a window flatten. Drawing is still task 10 (HandleDraw is a no-op).
+//
+// THE ORDER-EVENT RACE RULES THIS FILE. NT8 — Playback especially — can deliver
+// OnOrderUpdate/OnExecutionUpdate synchronously, in-stack, BEFORE the Enter*/
+// Exit* call that caused them returns. So every in-flight flag and every price
+// tracker is written BEFORE its submit, and every clear in the handlers is gated
+// on the signal NAME that set it. A tracker written after a submit is a tracker
+// the handler already read stale.
 #region Using declarations
 using System;
 using System.Collections.Generic;
@@ -75,6 +81,32 @@ namespace NinjaTrader.NinjaScript.Strategies
         private DateTime _curOnDate = DateTime.MinValue;
 
         private bool _lockout;
+
+        // --- order layer -----------------------------------------------------
+        private const string SigStop = "PZ_Stop";
+        private const string SigTarget = "PZ_Target";
+        private const string SigFlatten = "PZ_Flatten";
+
+        // The frozen actions behind the two orders that can be in flight, and
+        // the signal names actually submitted for them — the handlers gate every
+        // clear on the name, never on an Order reference: the reference is only
+        // assigned after Enter* RETURNS, which an in-stack fill beats.
+        private PzAction _pendingAction, _pendingAdd;
+        private string _entrySig, _addSig;
+        private bool _entryPending, _addPending, _flattenPending;
+        // A tracked, bracketed position exists. Distinguishes a later partial of
+        // a known order (resize) from a fill with nothing behind it (flatten).
+        private bool _inTrade;
+        private int _dir;                          // +1 long, -1 short, this trade
+        // Contracts held, summed from the execution events themselves rather than
+        // read off Position: the brackets must cover the fill being reported now,
+        // and NT8's own OnExecutionUpdate sample sizes from the order's fills for
+        // exactly that reason. Reset with the rest of the trade on went-flat.
+        private int _qty;
+        private int _adds;                         // adds FILLED — names PZ_ADD1..n
+        private double _stopPx, _targetPx;         // the live aggregate bracket, tick-rounded
+        private double _dayStartCum;               // realized CumProfit at the session open
+
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
         private readonly HashSet<string> _drawTags = new HashSet<string>();
@@ -223,6 +255,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             _atrBars = 0;
             _lockout = false;
             _rthOnlyWarned = false;
+
+            // Order state. A rewind discards the pass that owned these; anything
+            // that pass left working reappears as an execution with nothing
+            // behind it, which OnExecutionUpdate flattens on sight.
+            _pendingAction = null; _pendingAdd = null;
+            _entrySig = null; _addSig = null;
+            _entryPending = false; _addPending = false; _flattenPending = false;
+            _inTrade = false;
+            _dir = 0; _qty = 0; _adds = 0;
+            _stopPx = 0; _targetPx = 0;
+            // NaN until the first session open. Every comparison against NaN is
+            // false, so the daily-loss guard is inert until it is armed — which
+            // is correct: no entry can fire before a session open either.
+            _dayStartCum = double.NaN;
         }
 
         private string Tag(string t)
@@ -321,6 +367,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     _curRthDate = barStart.Date;
                     _lockout = false;                      // the daily lockout lasts until the next session
+                    // Baseline for the realized daily loss. Snapshotted here and
+                    // nowhere else, so the limit measures THIS session.
+                    _dayStartCum = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
                     _rthHigh = High[0];
                     _rthLow = Low[0];
                 }
@@ -339,16 +388,397 @@ namespace NinjaTrader.NinjaScript.Strategies
             // gate (min height, zone band, stop buffer, pole) proportionally.
             bool inWindow = startSecs >= _entriesWindowStartSecs && startSecs < _cutoffSecs;
             bool warm = _atrBars > AtrPeriod && _atr.IsReady;
-            bool canTrade = !_lockout && inWindow && warm;
+
+            // --- order management, BEFORE the engine call ------------------
+            // A position and a lockout both outlive the pattern that created
+            // them, and a lockout decided here has to gate THIS bar's actions.
+            bool flat = Position.MarketPosition == MarketPosition.Flat;
+            // Self-healing latch. Every flatten path gates on !_flattenPending,
+            // so a flatten whose exit never reached the went-flat bookkeeping (an
+            // unattributable fill, a rewind) would otherwise silence the cutoff
+            // backstop for the rest of the run. Flat means nothing is pending.
+            if (flat)
+                _flattenPending = false;
+            // Second look at the daily loss: SystemPerformance books a trade when
+            // the position closes, and if that booking lands after the execution
+            // event that closed it, this is what catches it — a bar late, but
+            // before any new entry, because it runs ahead of `canTrade`.
+            CheckDailyLoss();
+            // One Exit call is not guaranteed to fill. This test runs on every
+            // bar, so it IS the retry loop — for the cutoff and the lockout both.
+            if ((_lockout || startSecs >= _cutoffSecs) && !flat && !_flattenPending)
+                FlattenNow();
+
+            // inRth as well as inWindow: TradingStartHhmm can be set before the
+            // open, and the six permission levels are all previous-session
+            // aggregates — at 03:00 they describe a session that has not started.
+            bool canTrade = !_lockout && inWindow && inRth && warm;
             List<PzAction> actions = _engine.OnBarClosed(bar, _atr.Value, canTrade);
 
-            foreach (PzAction a in actions)                 // Task 9 replaces this with a switch
-                Print(string.Format(CultureInfo.InvariantCulture,
-                    "{0} {1:yyyy-MM-dd HH:mm} ACTION {2}{3} stop={4:0.##} tgt={5:0.##}{6}",
-                    Name, t, a.Type,
-                    a.Pattern != null ? " " + a.Pattern.Kind : "",
-                    a.StopPrice, a.TargetPrice,
-                    a.RejectReason != null ? " reject=" + a.RejectReason : ""));
+            foreach (PzAction a in actions)
+            {
+                switch (a.Type)
+                {
+                    case PzActionType.EnterLong:
+                    case PzActionType.EnterShort:
+                        SubmitEntry(a);
+                        break;
+                    case PzActionType.AddLong:
+                    case PzActionType.AddShort:
+                        SubmitAdd(a);
+                        break;
+                    default:
+                        HandleDraw(a);                     // Task 10
+                        break;
+                }
+            }
+        }
+
+        // --- order layer -----------------------------------------------------
+        //
+        // Every Enter*/Exit* call below is preceded by the tracker mutations the
+        // handlers read: NT8 can deliver the fill in-stack, before the submitting
+        // call returns. See the file header.
+
+        private static string SigFor(PatternKind k)
+        {
+            switch (k)
+            {
+                case PatternKind.DoubleTop:     return "PZ_DT";
+                case PatternKind.DoubleBottom:  return "PZ_DB";
+                case PatternKind.TripleTop:     return "PZ_TT";
+                case PatternKind.TripleBottom:  return "PZ_TB";
+                case PatternKind.HeadShoulders: return "PZ_HS";
+                default:                        return "PZ_IHS";
+            }
+        }
+
+        private static bool IsEntrySig(string n)
+        {
+            return n == "PZ_DT" || n == "PZ_DB" || n == "PZ_TT"
+                || n == "PZ_TB" || n == "PZ_HS" || n == "PZ_IHS";
+        }
+
+        private static bool IsAddSig(string n)
+        {
+            return n != null && n.StartsWith("PZ_ADD", StringComparison.Ordinal);
+        }
+
+        private void SubmitEntry(PzAction a)
+        {
+            // The engine has ALREADY moved to AwaitingEntryFill by emitting this
+            // action. Refusing without telling it would strand it there for the
+            // rest of the run, so every refusal path below reports the failure.
+            if (Position.MarketPosition != MarketPosition.Flat || _entryPending)
+            {
+                Print(Name + ": entry refused — not flat, or one is already working.");
+                _engine.OnEntryFailed();
+                return;
+            }
+
+            string sig = SigFor(a.Pattern.Kind);
+            _pendingAction = a;                            // all three BEFORE the submit
+            _entrySig = sig;
+            _entryPending = true;
+            Order o = a.Type == PzActionType.EnterLong
+                ? EnterLong(0, Contracts, sig)
+                : EnterShort(0, Contracts, sig);
+            if (o == null)
+            {
+                // NT8's internal order handling ignored the submission. Nothing
+                // is working, so releasing the gate is the whole point: left
+                // armed, `_entryPending` would silently end the run's trading.
+                _entryPending = false;
+                _pendingAction = null;
+                _engine.OnEntryFailed();
+                Print(Name + ": entry submission returned no order — gate released.");
+                return;
+            }
+            Print(string.Format(CultureInfo.InvariantCulture,
+                "{0} {1:yyyy-MM-dd HH:mm} ENTRY {2} {3} x{4} stop={5:0.##} tgt={6:0.##}",
+                Name, Time[0], sig, a.Pattern.Kind, Contracts, a.StopPrice, a.TargetPrice));
+        }
+
+        private void SubmitAdd(PzAction a)
+        {
+            // Same contract as SubmitEntry: the engine is in AwaitingAddFill and
+            // only OnAddFilled/OnAddFailed can move it out.
+            if (!_inTrade || Position.MarketPosition == MarketPosition.Flat || _addPending)
+            {
+                Print(Name + ": add refused — no tracked position, or one is already working.");
+                _engine.OnAddFailed();
+                return;
+            }
+
+            string sig = "PZ_ADD" + (_adds + 1).ToString(CultureInfo.InvariantCulture);
+            _pendingAdd = a;                               // all three BEFORE the submit
+            _addSig = sig;
+            _addPending = true;
+            Order o = a.Type == PzActionType.AddLong
+                ? EnterLong(0, Contracts, sig)
+                : EnterShort(0, Contracts, sig);
+            if (o == null)
+            {
+                _addPending = false;
+                _pendingAdd = null;
+                _engine.OnAddFailed();
+                Print(Name + ": add submission returned no order — gate released.");
+                return;
+            }
+            Print(string.Format(CultureInfo.InvariantCulture,
+                "{0} {1:yyyy-MM-dd HH:mm} ADD {2} x{3} newstop={4:0.##}",
+                Name, Time[0], sig, Contracts, a.StopPrice));
+        }
+
+        // BOTH legs, always together, and never before the trackers they read.
+        // Under OCO a stop cancel-replace kills the target leg too, so a resubmit
+        // that touched only the stop would silently leave the position without a
+        // target. `fromEntrySignal = ""` is what makes ONE stop and ONE target
+        // cover every tranche instead of one pair per entry signal.
+        private void SubmitExits()
+        {
+            // Only the quantity is guarded, and only against the not-yet-filled
+            // case. A price term here would be a way to submit NOTHING — stop
+            // included — and hold the position silently unprotected; a price NT8
+            // dislikes is better off rejected, which OnOrderUpdate turns into a
+            // flatten. Both are set in the same block that makes _qty positive.
+            if (_qty <= 0)
+                return;
+            if (_dir > 0)
+            {
+                ExitLongStopMarket(0, true, _qty, _stopPx, SigStop, "");
+                ExitLongLimit(0, true, _qty, _targetPx, SigTarget, "");
+            }
+            else
+            {
+                ExitShortStopMarket(0, true, _qty, _stopPx, SigStop, "");
+                ExitShortLimit(0, true, _qty, _targetPx, SigTarget, "");
+            }
+        }
+
+        // PREMISE: SINGLE INSTRUMENT. `Position` here — and every other
+        // handler-side Position read — is the primary series' position only
+        // because there is one instrument on this strategy.
+        //
+        // Explicit barsInProgressIndex: this is reached from OnExecutionUpdate
+        // too, where BarsInProgress is non-deterministic. The trailing "" is
+        // fromEntrySignal, not a signal name; empty detaches the exit from any
+        // single tranche so it closes the whole position.
+        private void FlattenNow()
+        {
+            _flattenPending = true;                        // BEFORE the Exit*
+            if (Position.MarketPosition == MarketPosition.Long)
+                ExitLong(0, Position.Quantity, SigFlatten, "");
+            else if (Position.MarketPosition == MarketPosition.Short)
+                ExitShort(0, Position.Quantity, SigFlatten, "");
+            else
+                _flattenPending = false;
+        }
+
+        private void Lockout(string why)
+        {
+            if (_lockout)
+                return;
+            _lockout = true;
+            Print(Name + ": " + why + " — locked out until the next session.");
+            if (Position.MarketPosition != MarketPosition.Flat && !_flattenPending)
+                FlattenNow();
+        }
+
+        // Realized only, and only against this session's baseline. `_dayStartCum`
+        // is NaN until the first session open; every comparison against NaN is
+        // false, so the guard is inert until it is armed.
+        private void CheckDailyLoss()
+        {
+            if (_lockout || DailyLossLimitUsd <= 0)
+                return;
+            double realized = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - _dayStartCum;
+            if (realized <= -DailyLossLimitUsd)
+                Lockout("daily loss " + realized.ToString("0", CultureInfo.InvariantCulture) + " USD");
+        }
+
+        // Task 10 owns the body. It exists now so the executor's switch is
+        // exhaustive and drawing lands in exactly one place later.
+        private void HandleDraw(PzAction a)
+        {
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId,
+            double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution == null || execution.Order == null)
+                return;
+            Order o = execution.Order;
+            string n = o.Name;
+            bool isAdd = IsAddSig(n);
+
+            if (isAdd || IsEntrySig(n))
+            {
+                // Anything that leaves us holding contracts counts: a full fill,
+                // a partial fill, or a cancel after a partial.
+                OrderState st = o.OrderState;
+                if (st != OrderState.Filled && st != OrderState.PartFilled
+                    && !(st == OrderState.Cancelled && o.Filled > 0))
+                    return;
+
+                // The frozen action is consumed on this order's FIRST execution;
+                // a later partial of the same order only resizes the brackets.
+                // `_entryPending` answers a different question — a PartFilled
+                // order is NOT terminal, its remainder is still working, so that
+                // gate stays shut until OnOrderUpdate reports the order dead.
+                PzAction a = null;
+                if (isAdd && n == _addSig)
+                {
+                    a = _pendingAdd;
+                    _pendingAdd = null;
+                    if (st != OrderState.PartFilled)
+                        _addPending = false;               // name-gated clear
+                }
+                else if (!isAdd && n == _entrySig)
+                {
+                    a = _pendingAction;
+                    _pendingAction = null;
+                    if (st != OrderState.PartFilled)
+                        _entryPending = false;             // name-gated clear
+                }
+
+                // A fill with nothing behind it: a rewound pass, a remainder
+                // arriving after its position already closed, or an add whose
+                // base is gone. Real contracts either way — never leave them
+                // unbracketed, and never fall through to the went-flat branch,
+                // which would latch _flattenPending on forever.
+                if (!_inTrade && (isAdd || a == null))
+                {
+                    Print(Name + ": " + n + " execution with no tracked trade behind it — flattening.");
+                    if (!_flattenPending)
+                        FlattenNow();
+                    // The engine may be awaiting a fill that will now never be
+                    // reported as one; put it back to flat rather than strand it.
+                    _engine.OnPositionClosed();
+                    return;
+                }
+
+                _qty += quantity;                          // trackers BEFORE the submits that read them
+                if (a != null)
+                {
+                    if (isAdd)
+                    {
+                        _adds++;
+                        // The add action's StopPrice IS the new aggregate stop
+                        // (the flag structure); the target is the pattern's and
+                        // does not move — every tranche exits at one price.
+                        _stopPx = Instrument.MasterInstrument.RoundToTickSize(a.StopPrice);
+                    }
+                    else
+                    {
+                        _inTrade = true;
+                        _dir = a.Type == PzActionType.EnterLong ? 1 : -1;
+                        _stopPx = Instrument.MasterInstrument.RoundToTickSize(a.StopPrice);
+                        _targetPx = Instrument.MasterInstrument.RoundToTickSize(a.TargetPrice);
+                    }
+                }
+
+                // PROTECTION FIRST — nothing goes between a live fill and its
+                // stop. The lockout branch closes a fill that landed while the
+                // lockout was already up, on the fill event itself: no brackets,
+                // no extra bar of exposure.
+                if (_lockout)
+                {
+                    if (!_flattenPending)
+                        FlattenNow();
+                }
+                else
+                    SubmitExits();
+
+                // The engine hears about the fill only once the protection is out.
+                if (a != null)
+                {
+                    if (isAdd)
+                        _engine.OnAddFilled(price);
+                    else
+                        _engine.OnEntryFilled(price);
+                }
+                return;
+            }
+
+            // Went flat, by any exit: our brackets, our flatten, or NT8's own
+            // "Exit on session close". Gated on `_inTrade` so a stale exit around
+            // a Playback rewind books nothing against the fresh pass.
+            if (!_inTrade || Position.MarketPosition != MarketPosition.Flat)
+                return;
+
+            _inTrade = false;
+            _flattenPending = false;
+            _qty = 0;
+            _adds = 0;
+            _stopPx = 0; _targetPx = 0;
+            // An add still working has nothing left to add to. It is a market
+            // order so it has almost certainly filled already; if it fills after
+            // this, the orphan net above flattens it.
+            _addPending = false;
+            _pendingAdd = null;
+
+            _engine.OnPositionClosed();
+            CheckDailyLoss();
+        }
+
+        protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
+            int quantity, int filled, double averageFillPrice, OrderState orderState,
+            DateTime time, ErrorCode error, string comment)
+        {
+            if (order == null)
+                return;
+            string n = order.Name;
+
+            if (n == SigFlatten)
+            {
+                if (orderState == OrderState.Rejected || orderState == OrderState.Cancelled)
+                    _flattenPending = false;               // the bar loop retries
+                return;
+            }
+
+            if (n == SigStop || n == SigTarget)
+            {
+                // Cancelled here is almost always the echo of our own
+                // cancel-replace on an add, which is why no order references are
+                // kept to compare against — the state itself separates them.
+                // Rejected is never an echo: it means a live position just lost a
+                // bracket leg, and unprotected is not a state this strategy holds.
+                if (orderState == OrderState.Rejected
+                    && Position.MarketPosition != MarketPosition.Flat && !_flattenPending)
+                {
+                    Print(Name + ": " + n + " REJECTED (" + error + ") — position unprotected, flattening.");
+                    FlattenNow();
+                }
+                return;
+            }
+
+            if (orderState != OrderState.Rejected && orderState != OrderState.Cancelled)
+                return;
+
+            // The order is dead, so its gate is released either way. Whether the
+            // ENGINE hears "failed" depends on whether anything filled: a cancel
+            // after a partial already reported OnEntryFilled/OnAddFilled from the
+            // execution handler, and a "failed" on top of that would drop the
+            // engine out of a position it is actually in.
+            if (IsAddSig(n) && n == _addSig && _addPending)
+            {
+                _addPending = false;
+                if (filled == 0)
+                {
+                    _pendingAdd = null;
+                    _engine.OnAddFailed();
+                }
+            }
+            else if (IsEntrySig(n) && n == _entrySig && _entryPending)
+            {
+                _entryPending = false;
+                if (filled == 0)
+                {
+                    _pendingAction = null;
+                    _engine.OnEntryFailed();
+                }
+            }
         }
 
         #region Properties
