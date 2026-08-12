@@ -28,6 +28,7 @@ namespace PatternZone.Tests
             CoreTests.Run();
             DoubleTests.Run();
             TripleHsTests.Run();
+            ZoneTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
         }
@@ -142,6 +143,51 @@ namespace PatternZone.Tests
             var ihs = new List<PzSwing> { S(0,112,true), S(5,104,false), S(8,107,true), S(12,102,false), S(15,106,true), S(20,103.8,false) };
             var hi = PatternScanner.TryHeadShoulders(ihs, cfg, atr);
             T.Check(hi != null && hi.Kind == PatternKind.InverseHeadShoulders && !hi.IsShort, "inverse H&S found");
+        }
+    }
+
+    public static class ZoneTests
+    {
+        public static void Run()
+        {
+            Console.WriteLine("ZoneTests");
+            var cfg = new PzConfig();                       // half-width 0.5 * atr
+            var z = new ZoneEngine(cfg);
+            double atr = 2.0;                               // band = level +/- 1.0
+            z.SetLevels(new SessionLevels { PriorDayHigh = 110.1, PriorDayLow = 90.0, PriorClose = 100.0 });
+
+            var dt = new PatternCandidate
+            {
+                Kind = PatternKind.DoubleTop, IsShort = true,
+                ZoneExtremes = new[] { 110.0, 110.3 }, ExtremePrice = 110.3
+            };
+            double lvl;
+            T.Check(z.Permits(dt, atr, out lvl), "DT at PDH permitted");
+            T.CheckClose(lvl, 110.1, "zone level = PDH");
+
+            // Both tops must share ONE band: 110 fits PDH band, 108.5 fits nothing.
+            var dt2 = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 108.5 }, ExtremePrice = 110.0 };
+            T.Check(!z.Permits(dt2, atr, out lvl), "split tops rejected");
+
+            // Round-100: extremes near 30000 permitted with no session level nearby.
+            var z2 = new ZoneEngine(cfg);
+            z2.SetLevels(new SessionLevels());              // all NaN
+            var dt3 = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 29999.5, 30000.75 }, ExtremePrice = 30000.75 };
+            T.Check(z2.Permits(dt3, atr, out lvl), "round-100 zone works");
+            T.CheckClose(lvl, 30000.0, "nearest round level");
+
+            // Round-50 off by default.
+            var dt4 = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 29949.8, 29950.2 }, ExtremePrice = 29950.2 };
+            T.Check(!z2.Permits(dt4, atr, out lvl), "round-50 off by default");
+            cfg.UseRound50 = true;
+            T.Check(z2.Permits(dt4, atr, out lvl), "round-50 on when toggled");
+            cfg.UseRound50 = false;
+
+            // Triple: 2 of 3 suffice. H&S: head only.
+            var tt = new PatternCandidate { Kind = PatternKind.TripleTop, IsShort = true, ZoneExtremes = new[] { 110.0, 110.4, 108.0 }, ExtremePrice = 110.4 };
+            T.Check(z.Permits(tt, atr, out lvl), "triple 2-of-3 permitted");
+            var hs = new PatternCandidate { Kind = PatternKind.HeadShoulders, IsShort = true, ZoneExtremes = new[] { 110.5 }, ExtremePrice = 110.5 };
+            T.Check(z.Permits(hs, atr, out lvl), "HS head permitted");
         }
     }
 }

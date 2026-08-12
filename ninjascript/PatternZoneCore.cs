@@ -137,6 +137,102 @@ namespace PatternZoneCore
         }
     }
 
+    public sealed class SessionLevels
+    {
+        // double.NaN = unavailable (e.g. first loaded day). All prices, not offsets.
+        public double PriorDayHigh = double.NaN, PriorDayLow = double.NaN;
+        public double OvernightHigh = double.NaN, OvernightLow = double.NaN;
+        public double PriorClose = double.NaN, DayOpen = double.NaN;
+    }
+
+    // Permission rule of spec §5: extremes must cluster in ONE band around a
+    // named or round level. Toggles/half-width read from cfg at call time
+    // (not snapshotted) since PzConfig is mutable for the life of the engine.
+    public sealed class ZoneEngine
+    {
+        private readonly PzConfig _cfg;
+        private SessionLevels _levels = new SessionLevels();
+
+        public ZoneEngine(PzConfig cfg)
+        {
+            _cfg = cfg;
+        }
+
+        public void SetLevels(SessionLevels levels)
+        {
+            _levels = levels;
+        }
+
+        public SessionLevels Levels { get { return _levels; } }
+
+        // Session levels (toggled on, non-NaN) first, then nearest round levels —
+        // a named level beats a round number for reporting when both match.
+        public List<double> CandidateLevels(double refPrice)
+        {
+            var result = new List<double>();
+            if (_cfg.UsePriorDayHL)
+            {
+                if (!double.IsNaN(_levels.PriorDayHigh)) result.Add(_levels.PriorDayHigh);
+                if (!double.IsNaN(_levels.PriorDayLow)) result.Add(_levels.PriorDayLow);
+            }
+            if (_cfg.UseOvernightHL)
+            {
+                if (!double.IsNaN(_levels.OvernightHigh)) result.Add(_levels.OvernightHigh);
+                if (!double.IsNaN(_levels.OvernightLow)) result.Add(_levels.OvernightLow);
+            }
+            if (_cfg.UsePriorClose && !double.IsNaN(_levels.PriorClose))
+                result.Add(_levels.PriorClose);
+            if (_cfg.UseDayOpen && !double.IsNaN(_levels.DayOpen))
+                result.Add(_levels.DayOpen);
+
+            if (_cfg.UseRound100)
+            {
+                double r100 = Math.Round(refPrice / 100.0) * 100.0;
+                result.Add(r100);
+            }
+            if (_cfg.UseRound50)
+            {
+                double r50 = Math.Round(refPrice / 50.0) * 50.0;
+                if (result.Count == 0 || r50 != result[result.Count - 1])
+                    result.Add(r50);
+            }
+            return result;
+        }
+
+        public bool Permits(PatternCandidate p, double atr, out double zoneLevel)
+        {
+            double hw = _cfg.ZoneHalfWidthAtr * atr;
+            int required = RequiredCount(p.Kind);
+
+            foreach (double level in CandidateLevels(p.ZoneExtremes[0]))
+            {
+                int count = 0;
+                foreach (double e in p.ZoneExtremes)
+                    if (Math.Abs(e - level) <= hw)
+                        count++;
+                if (count >= required)
+                {
+                    zoneLevel = level;
+                    return true;
+                }
+            }
+            zoneLevel = 0.0;
+            return false;
+        }
+
+        private static int RequiredCount(PatternKind kind)
+        {
+            switch (kind)
+            {
+                case PatternKind.HeadShoulders:
+                case PatternKind.InverseHeadShoulders:
+                    return 1;
+                default:
+                    return 2;
+            }
+        }
+    }
+
     public static class PatternScanner
     {
         // Each returns null or a candidate built from the TAIL of the alternating swing list.
