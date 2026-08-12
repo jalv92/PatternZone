@@ -23,6 +23,9 @@ namespace PatternZoneCore
         public double HeadProminenceAtr = 0.30;
         public int MaxPatternBars = 60;
         public int NecklineBreakTicks = 2;
+        // Amendment 2: a reversal pattern needs a prior trend to reverse.
+        public bool UseTrendFilter = true;
+        public int TrendLookbackBars = 60;
         public double TickSize = 0.25;
         public double MinPatternHeightAtr = 1.5;
         public double ZoneHalfWidthAtr = 0.50;
@@ -127,8 +130,11 @@ namespace PatternZoneCore
         public PatternKind Kind;
         public bool IsShort;                 // top-family => short
         public PzSwing[] Swings;             // defining swings, oldest first (3 or 5)
-        public double ExtremePrice;          // stop anchor: max top / head / min bottom
+        public double ExtremePrice;          // invalidation level: max top / head / min bottom
         public int ArmedBarIndex;            // bar the candidate was created on
+        // Amendment 2: was there a trend to reverse? Evaluated ONCE, at
+        // creation, against the history behind the first defining swing.
+        public bool TrendOk;
         // Neckline as a 2-point line; equal points => horizontal.
         public PzSwing NeckP1, NeckP2;
         public double[] ZoneExtremes;        // prices that must touch a zone (2 tops, 3 tops, or head)
@@ -566,7 +572,7 @@ namespace PatternZoneCore
         // Amendment 1: the drawing layer no longer consumes this — the neckline
         // is not drawn. Kept because it is the trigger price of record.
         public double NecklineAtBreak;
-        // DrawRejected: "zone" | "height" | "busy" | "session_cap" | "flag_no_position".
+        // DrawRejected: "zone" | "height" | "trend" | "busy" | "session_cap" | "flag_no_position".
         // The last one is unreachable here by construction (spec §7/rule 8: the
         // flag detector is only ever armed while in position), so no branch
         // below emits it — it stays in the shell's vocabulary, not the engine's.
@@ -582,12 +588,21 @@ namespace PatternZoneCore
         private enum PzState { Flat, AwaitingEntryFill, InPosition, AwaitingAddFill }
 
         private const int MaxRetainedSwings = 40;
+        // Amendment 2: recent bar extremes, keyed by bar index, for the
+        // prior-trend window. ponytail: 512 covers the default lookback (60)
+        // plus the widest pattern span several times over; a window that starts
+        // before the ring is treated as unevaluable and PASSES, the same way
+        // short history does — the gate never fails on missing data. Raise this
+        // if TrendLookbackBars + MaxPatternBars ever approaches it.
+        private const int TrendRingSize = 512;
 
         private readonly PzConfig _cfg;
         private readonly SwingDetector _swingDetector;
         private readonly ZoneEngine _zones;
         private readonly FlagDetector _flags;
         private readonly List<PzSwing> _alt = new List<PzSwing>();
+        private readonly double[] _ringHigh = new double[TrendRingSize];
+        private readonly double[] _ringLow = new double[TrendRingSize];
         // Swings that belonged to a pattern that actually entered; they can
         // never arm anything again. Persists across sessions with _alt.
         private readonly HashSet<long> _consumed = new HashSet<long>();
@@ -625,6 +640,8 @@ namespace PatternZoneCore
         public List<PzAction> OnBarClosed(PzBar bar, double atr, bool canTrade)
         {
             _barIndex++;
+            _ringHigh[_barIndex % TrendRingSize] = bar.High;
+            _ringLow[_barIndex % TrendRingSize] = bar.Low;
             var actions = new List<PzAction>();
 
             foreach (PzSwing s in _swingDetector.Update(bar, _barIndex))
@@ -709,10 +726,38 @@ namespace PatternZoneCore
             if (c == null)
                 return;
             c.ArmedBarIndex = _barIndex;
+            c.TrendOk = TrendPermits(c);
             if (c.IsShort)
                 _armedShort = c;
             else
                 _armedLong = c;
+        }
+
+        // Amendment 2. A top-family pattern only reverses something if its FIRST
+        // top is the highest high of the window behind it — you can only print
+        // that after an up-leg. Mirror for bottoms. Ties pass: the first top is
+        // itself a bar high inside the window, so the test is "nothing beat it".
+        // Evaluated at creation, off the first defining swing, so a pattern is
+        // judged by the leg that built it and not by whatever happened while it
+        // was still arming.
+        private bool TrendPermits(PatternCandidate c)
+        {
+            if (!_cfg.UseTrendFilter)
+                return true;
+            PzSwing s0 = c.Swings[0];
+            int oldest = Math.Max(0, _barIndex - (TrendRingSize - 1));
+            if (s0.BarIndex < oldest)
+                return true;                     // older than the ring: unevaluable, never a rejection
+            int start = Math.Max(s0.BarIndex - _cfg.TrendLookbackBars, oldest);
+            for (int i = start; i <= s0.BarIndex; i++)
+            {
+                bool beaten = c.IsShort
+                    ? _ringHigh[i % TrendRingSize] > s0.Price
+                    : _ringLow[i % TrendRingSize] < s0.Price;
+                if (beaten)
+                    return false;
+            }
+            return true;
         }
 
         // Most specific first. A match built on a consumed swing is skipped
@@ -798,6 +843,14 @@ namespace PatternZoneCore
             if (height < _cfg.MinPatternHeightAtr * atr)
             {
                 actions.Add(Reject(c, "height", neckline));
+                return;
+            }
+            // Amendment 2, and it sits AHEAD of the zone: a pattern with no
+            // trend behind it is not a reversal at all, whatever level it
+            // formed on. Decided at creation (c.TrendOk), reported here.
+            if (!c.TrendOk)
+            {
+                actions.Add(Reject(c, "trend", neckline));
                 return;
             }
             double zoneLevel;

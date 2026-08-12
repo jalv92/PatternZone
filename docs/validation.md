@@ -85,8 +85,14 @@ Run once per must-pass episode.
 - [ ] **1. Load** — MNQ 1m chart, ETH template, Days to load covering the
       episode date + 2 days before it.
 - [ ] **2. Enable** — apply `PatternZoneStrategy` with defaults, plus
-      `DrawRejectedPatterns = true` for this phase only (it is the audit tool:
-      it shows the patterns the permission gauntlet refused and why).
+      `DrawRejectedPatterns = true` for this phase only. It is the audit tool,
+      and since Amendment 2 it works in two places at once: refused patterns are
+      drawn faintly on the chart **and** each one prints its reason to the
+      **Output window** (`REJECTED <reason> <pattern kind>`). The chart itself
+      still carries no text, so the Output window is where the WHY lives. The
+      vocabulary is `busy` / `session_cap` / `height` / `trend` / `zone`, and it
+      is evaluated in that order — a pattern that fails two gates reports the
+      first one only.
 - [ ] **3. Replay** — Market Replay through the episode at a speed where you
       can watch the bars close.
 - [ ] **4. Screenshot** — capture the chart at the moment the pattern is
@@ -133,7 +139,14 @@ Run once per must-pass episode.
       `ZoneProximityAtr = 0` — but that is a different strategy, not a display
       option, so put it back before Phase 3.
 - [ ] No text anywhere on the chart. The design forbids labels, names and
-      tables (spec decision #6).
+      tables (spec decision #6). Rejection reasons appear in the **Output
+      window**, never on the chart.
+- [ ] **Every drawn reversal has a trend behind it** (Amendment 2). Scroll back
+      from each pattern: a short (M) must sit at the top of a rise, a long (W)
+      at the bottom of a fall. A top armed mid-decline is the exact defect this
+      gate was added for — if one appears, the gate is broken, not the drawing.
+      Expect `REJECTED trend ...` lines in the Output window for the ones it
+      caught.
 
 ---
 
@@ -240,7 +253,8 @@ Setup, all of it mandatory:
       keeps them in the strategy template. Reset **`Contracts` → 1**,
       **`TargetMultiple` → 1.0**, **`DailyLossLimitUsd` → 200**,
       **`ZoneProximityAtr` → 0.50** (Phase 1 may have zeroed it to eyeball the
-      strict band) and **`StopOffsetTicks` → 10**, then read the **whole
+      strict band), **`StopOffsetTicks` → 10**, **`UseTrendFilter` → true** and
+      **`TrendLookbackBars` → 60**, then read the **whole
       parameter grid** against the README's parameter table. A leftover
       `TargetMultiple = 0.3` produces a complete, plausible, worthless backtest,
       and the generic "defaults untouched" instruction below will not catch it.

@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/edge-not%20measured-lightgrey?style=flat-square" alt="edge: not measured">
   <img src="https://img.shields.io/badge/platform-NinjaTrader%208-1f6feb?style=flat-square" alt="platform: NinjaTrader 8">
   <img src="https://img.shields.io/badge/instrument-MNQ%201m-f7931a?style=flat-square" alt="instrument: MNQ 1-minute">
-  <img src="https://img.shields.io/badge/tests-130%20passing-brightgreen?style=flat-square" alt="tests: 130 passing">
+  <img src="https://img.shields.io/badge/tests-135%20passing-brightgreen?style=flat-square" alt="tests: 135 passing">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
@@ -38,7 +38,7 @@ Nothing on this page is a claim about profitability.
 
 | Phase | What it establishes | Status |
 |---|---|---|
-| Unit tests | The detection and decision core behaves as specified | **130 passing** |
+| Unit tests | The detection and decision core behaves as specified | **135 passing** |
 | 1 — Visual QA | The detector sees the patterns a human sees | Pending |
 | 2 — Order-layer exercises | The order plumbing survives the events that break NT8 strategies | Pending |
 | 3 — Frozen backtest | Whether there is anything here at all | Not run |
@@ -90,6 +90,12 @@ study found its lookahead.
 closes beyond the neckline by at least 2 ticks; entry is at market on the next
 bar's open. Top-family patterns go short, bottom-family long.
 
+**A reversal needs something to reverse.** A pattern only qualifies if its first
+defining extreme is the extreme of the 60 bars behind it — a double top after an
+up-leg, a double bottom after a down-leg. Without that test the strategy will
+happily short an M that formed halfway down a decline, which is not a reversal
+at all; it did exactly that during the first visual QA, and this gate is the fix.
+
 **Permission — the thesis.** Before a fired pattern becomes a trade, its
 extremes must sit inside one band around a level — the level ± 0.5 × ATR(14),
 plus another 0.5 × ATR of proximity allowance:
@@ -104,7 +110,9 @@ plus another 0.5 × ATR of proximity allowance:
   band and still qualify. That gap is deliberate, not a rendering bug.
 
 A pattern that fires away from every level is drawn (with
-`DrawRejectedPatterns`) and never traded.
+`DrawRejectedPatterns`) and never traded. With that switch on, every refusal
+also prints its reason — `busy`, `session_cap`, `height`, `trend` or `zone` — to
+the Output window, since the chart deliberately carries no text.
 
 **Stop and target.** The stop sits 10 ticks beyond the pattern's **last
 defining swing** — the second top or bottom, the third extreme of a triple, or
@@ -171,14 +179,14 @@ The first trade is possible on the 15th bar (ATR warmup).
 
 **Statistical dials — frozen.** These were fixed before any P&L was seen.
 Changing one is a pre-registered amendment that earns its own out-of-sample run,
-not a tweak. One amendment has been made so far — the stop rule and the zone
-proximity allowance, on 2026-08-12, from watching the detector draw and still
-with no P&L in existence. It is written up in
-[`docs/design.md`](docs/design.md#amendments).
+not a tweak. Two amendments have been made so far — the stop rule and zone
+proximity allowance, then the prior-trend gate — both on 2026-08-12, both from
+watching the detector draw, and both while no P&L existed. They are written up
+in [`docs/design.md`](docs/design.md#amendments).
 
 | Group | Parameters | Defaults |
 |---|---|---|
-| Detection | Swing strength · top tolerance · head prominence · max pattern span · neckline break · min pattern height | 3 · 0.30 ATR · 0.30 ATR · 60 bars · 2 ticks · 1.5 ATR |
+| Detection | Swing strength · top tolerance · head prominence · max pattern span · neckline break · min pattern height · prior-trend gate · trend lookback | 3 · 0.30 ATR · 0.30 ATR · 60 bars · 2 ticks · 1.5 ATR · on · 60 bars |
 | Zones | Zone half-width · zone proximity · six level toggles | 0.50 ATR · 0.50 ATR · all on except round 50s |
 | Entry | Stop offset · stop buffer (add-on stop only) · target multiple | 10 ticks · 0.50 ATR · 1.0 × height |
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |

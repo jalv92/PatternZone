@@ -46,6 +46,7 @@ The core hypothesis: reversal patterns as such carry no edge on NQ intraday (ext
 | H&S / inverse | 3 highs (lows): head exceeds both shoulders by ≥ `HeadProminenceAtr`; shoulders within `TopToleranceAtr` of each other | line through the two intervening valleys (peaks); trigger level = its value at the breaking bar |
 
 **Structural rules:**
+- **Prior trend (Amendment 2):** a reversal must have something to reverse. The pattern's FIRST defining extreme must be the extreme of the `TrendLookbackBars` window behind it — a top-family pattern only after an up-leg, a bottom-family one only after a down-leg. Evaluated once, at candidate creation. Shorter history clamps rather than rejecting.
 - Max pattern width: first defining swing → neckline break ≤ `MaxPatternBars` (default 60 × 1m).
 - Min pattern height (extreme→neckline) ≥ `MinPatternHeightAtr` — kills micro-patterns AND guarantees stops > 1 ATR (§2).
 - One live armed pattern per direction; first confirmed break wins; swings of a traded pattern are consumed (no re-trigger on the same structure). A double top whose neckline never breaks can evolve into a triple top / H&S as new swings confirm.
@@ -124,6 +125,8 @@ Statistical dials (frozen before any P&L is seen; changes = documented amendment
 | 4 | MaxPatternBars | 60 |
 | 5 | NecklineBreakTicks | 2 |
 | 6 | MinPatternHeightAtr | 1.5 |
+| 6a | UseTrendFilter *(Amendment 2)* | true |
+| 6b | TrendLookbackBars *(Amendment 2)* | 60 |
 | 7 | ZoneHalfWidthAtr | 0.50 |
 | 8 | ZoneProximityAtr *(Amendment 1)* | 0.50 |
 | 9–14 | Level toggles (PDH/PDL, ON H/L, prior close, day open, ×100, ×50) | on ×5, ×50 off |
@@ -221,3 +224,26 @@ Consequence for the geometry: risk is no longer a pure ATR multiple, since the
 stop offset is a fixed tick distance while the pattern height is ATR-scaled.
 There is no single R floor across pattern families any more — see
 `docs/validation.md` (Phase 3, "On the breakeven") for the recomputed numbers.
+
+**Amendment 2 — 2026-08-12 (pre-P&L, from Phase 1 visual QA).** Javier watched
+the strategy arm a top-family (short) reversal in the middle of a decline. A
+reversal pattern with no prior trend is not a reversal of anything, and nothing
+in the frozen §4 rules said so — the omission was a gap in the spec, not a
+tuning preference, which is why it is fixed rather than left for a later run.
+
+5. **Prior-trend gate.** `UseTrendFilter` (default true) and
+   `TrendLookbackBars` (default 60). At candidate CREATION the engine checks the
+   window `[first defining swing − TrendLookbackBars .. first defining swing]`:
+   a top-family pattern is permitted only if that first top is the window's
+   highest high, a bottom-family one only if its first bottom is the lowest low.
+   Ties pass (the swing is itself a bar in the window). The window clamps to the
+   history actually available, so a short history never auto-rejects.
+   The `Fire` gauntlet order is now, and is pinned as:
+   **busy → canTrade (silent) → session_cap → height → trend → zone**, so a
+   pattern with no trend behind it reports `"trend"` even when it is also off
+   its zone.
+6. **Rejection reasons became observable.** The chart carries no text by design
+   (decision #6), which left the whole gauntlet unauditable in Replay. When
+   `DrawRejectedPatterns` is on, each rejection now also prints one line — time,
+   `REJECTED`, reason, pattern kind — to the **Output window**. The
+   no-text-on-chart rule is untouched.

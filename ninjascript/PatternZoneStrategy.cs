@@ -17,7 +17,7 @@
 //
 // ATR: PatternZoneCore.WilderAtr(14), hand-rolled and fed from OnBarUpdate —
 // nt8c cannot resolve the ATR() system wrapper (workspace gotcha) and the core's
-// recursion is the one the 130 unit tests pin. It crosses sessions and never
+// recursion is the one the 135 unit tests pin. It crosses sessions and never
 // resets, so `canTrade` also gates on 14 fed bars: the engine's internal
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
@@ -166,6 +166,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MaxPatternBars = 60;
                 NecklineBreakTicks = 2;
                 MinPatternHeightAtr = 1.5;
+                UseTrendFilter = true;
+                TrendLookbackBars = 60;
 
                 ZoneHalfWidthAtr = 0.50;
                 ZoneProximityAtr = 0.50;
@@ -215,6 +217,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     NecklineBreakTicks = NecklineBreakTicks,
                     TickSize = TickSize,                 // the instrument's, not a dial
                     MinPatternHeightAtr = MinPatternHeightAtr,
+                    UseTrendFilter = UseTrendFilter,
+                    TrendLookbackBars = TrendLookbackBars,
                     ZoneHalfWidthAtr = ZoneHalfWidthAtr,
                     ZoneProximityAtr = ZoneProximityAtr,
                     UsePriorDayHL = UsePriorDayHL,
@@ -712,6 +716,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         // and rectangles below.
         private void HandleDraw(PzAction a)
         {
+            // Amendment 2. WHY a pattern was refused is invisible on the chart
+            // by construction (no text, ever), which made the gauntlet
+            // unauditable in Replay. The reason goes to the Output window
+            // instead — ahead of the ChartControl guard, so a headless Analyzer
+            // run can be audited too, and behind the same toggle so a real run
+            // stays silent.
+            if (a.Type == PzActionType.DrawRejected && DrawRejectedPatterns)
+                Print(string.Format(CultureInfo.InvariantCulture,
+                    "{0} {1:yyyy-MM-dd HH:mm} REJECTED {2} {3}",
+                    Name, Time[0], a.RejectReason, a.Pattern.Kind));
+
             if (ChartControl == null)              // headless Strategy Analyzer: never draw
                 return;
 
@@ -1077,6 +1092,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0.5, 5.0)]
         [Display(Name = "Min pattern height (x ATR)", Description = "Extreme-to-neckline distance below this is noise, not a pattern. Also sets the target, which is one height from the neckline.", GroupName = "01. Detection", Order = 5)]
         public double MinPatternHeightAtr { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Require a prior trend", Description = "A reversal pattern must have something to reverse: its FIRST defining extreme must be the extreme of the lookback window behind it (tops only after an up-leg, bottoms only after a down-leg).", GroupName = "01. Detection", Order = 6)]
+        public bool UseTrendFilter { get; set; }
+
+        [NinjaScriptProperty, Range(10, 500)]
+        [Display(Name = "Trend lookback (bars)", Description = "How far back the prior-trend window reaches from the pattern's first defining extreme. Shorter history than this is not a rejection — the window clamps.", GroupName = "01. Detection", Order = 7)]
+        public int TrendLookbackBars { get; set; }
 
         [NinjaScriptProperty, Range(0.1, 2.0)]
         [Display(Name = "Zone half-width (x ATR)", Description = "Half-width of the band around a level, and the band DRAWN on the chart. A pattern's extremes must cluster inside one band (plus the proximity allowance below) for the pattern to be permitted.", GroupName = "02. Zones", Order = 0)]

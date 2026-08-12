@@ -193,6 +193,15 @@ namespace PatternZone.Tests
             108.4, 110, 109, 108, 107, 108, 109.3, 108, 106.5, 105.5
         };
 
+        // A monotonic decline into whatever follows it (no strict local extreme
+        // in the interior, so it confirms no swings of its own). Prefixed to an
+        // M, it makes that M's first top sit far BELOW the window's earlier
+        // highs — a "reversal" of nothing, which is exactly what Amendment 2
+        // refuses.
+        static readonly double[] DeclineTo100 = {
+            130, 128, 126, 124, 122, 120, 118, 116, 114, 112, 110, 108, 106, 104, 102
+        };
+
         static double[] Shift(double[] closes, double delta)
         {
             var r = new double[closes.Length];
@@ -328,7 +337,12 @@ namespace PatternZone.Tests
             // TargetMultiple 2.0 puts the target at 79.6 so the second flag has
             // room to spare on the distance guard: if the detector were still
             // live, that flag WOULD add, which is what makes this a real check.
-            var eAdd = Fresh(new PzConfig { SwingStrength = 2, TargetMultiple = 2.0 });
+            // UseTrendFilter off: this fixture isolates the add-failure paths,
+            // and part (c) below re-runs the M from a much lower price — its
+            // first top no longer clears the earlier tops still inside the
+            // lookback window, so the trend gate would refuse the recovery
+            // entry and the test would stop testing OnAddFailed.
+            var eAdd = Fresh(new PzConfig { SwingStrength = 2, TargetMultiple = 2.0, UseTrendFilter = false });
             Wander(eAdd, MAt110);
             eAdd.OnEntryFilled(99.4);
             Wander(eAdd, 97, 95, 94);
@@ -448,7 +462,14 @@ namespace PatternZone.Tests
             // and the triple off it is valid too; both are refused only because
             // the traded pattern's swings are consumed. Nothing arms, so no
             // second entry is reachable.
-            var cfgCons = new PzConfig { SwingStrength = 2 };
+            // UseTrendFilter off, and this one is subtle: the fixture passes
+            // either way, but only with the gate off does it still FAIL when
+            // the consumed marks break. The re-formed tail arms a TRIPLE whose
+            // first extreme (110.0) is beaten by the traded M's 110.2 inside
+            // the window, so with the gate on a consumed-swings regression
+            // would surface as a "trend" rejection instead of the entry these
+            // assertions look for — the pin would quietly stop carrying itself.
+            var cfgCons = new PzConfig { SwingStrength = 2, UseTrendFilter = false };
             var eCons = Fresh(cfgCons);
             var consFirst = Wander(eCons, MAt110);
             T.Check(Find(consFirst, PzActionType.EnterShort) != null, "the M trades once");
@@ -488,6 +509,33 @@ namespace PatternZone.Tests
             PzAction offEnt = Find(Wander(eOff, MAt110), PzActionType.EnterShort);
             T.Check(offEnt != null, "a wider stop offset still enters");
             T.CheckClose(offEnt.StopPrice, 115.2, "stop tracks StopOffsetTicks");
+
+            // --- Amendment 2: the prior-trend gate. The SAME M that trades on
+            // its own (the very first check in this suite) is refused when a
+            // decline is prefixed to it: its first top is no longer the highest
+            // high of the lookback window, so there is no up-leg being
+            // reversed. The tops still sit on PDH 110, so the zone would
+            // permit it — the rejection is attributable to the trend alone.
+            var eTrend = Fresh(new PzConfig { SwingStrength = 2 });
+            Wander(eTrend, DeclineTo100);
+            var trendActs = Wander(eTrend, MAt110);
+            T.Check(Find(trendActs, PzActionType.EnterShort) == null, "mid-decline top does not enter");
+            T.Check(Rejected(trendActs, "trend") != null, "trend rejection");
+
+            // Same bars, filter off -> enters. This is what makes the check
+            // above a test of the FILTER and not of the fixture.
+            var eNoTrend = Fresh(new PzConfig { SwingStrength = 2, UseTrendFilter = false });
+            Wander(eNoTrend, DeclineTo100);
+            var noTrendActs = Wander(eNoTrend, MAt110);
+            T.Check(Find(noTrendActs, PzActionType.EnterShort) != null, "the same shape enters with the trend filter off");
+
+            // Precedence: a pattern that fails BOTH trend and zone reports the
+            // trend (mid-decline AND four points off every level).
+            var eBoth = Fresh(new PzConfig { SwingStrength = 2 });
+            Wander(eBoth, DeclineTo100);
+            var bothActs = Wander(eBoth, Shift(MAt110, -4));
+            T.Check(Rejected(bothActs, "trend") != null, "trend beats zone in the rejection order");
+            T.Check(Rejected(bothActs, "zone") == null, "one pattern reports exactly one reason");
         }
     }
 
