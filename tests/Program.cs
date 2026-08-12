@@ -146,8 +146,10 @@ namespace PatternZone.Tests
             // H&S above, so the preceding low at bar 0 is index Count-6.
             T.Check(h.HasLeadIn && h.LeadInSwing.BarIndex == 0 && !h.LeadInSwing.IsHigh, "HS lead-in is the prior low");
             T.CheckClose(h.LeadInSwing.Price, 100.0, "HS lead-in price");
-            var dtLead = PatternScanner.TryDouble(hs, cfg, atr);   // last 3 of the same list: (12,110,hi),(15,106,lo),(20,108.3,hi)
-            T.Check(dtLead == null || dtLead.LeadInSwing.BarIndex == 8, "double lead-in is the swing before its first top");
+            var dtLead = PatternScanner.TryDouble(
+                new List<PzSwing> { S(5,104,false), S(10,110,true), S(15,105,false), S(20,110.3,true) }, cfg, atr);
+            T.Check(dtLead != null && dtLead.LeadInSwing.BarIndex == 5 && !dtLead.LeadInSwing.IsHigh,
+                "double lead-in is the swing before its first top");
 
             // Only the defining swings in the list -> no lead-in, and the
             // drawing omits that segment rather than inventing a point.
