@@ -122,6 +122,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
         private readonly HashSet<string> _drawTags = new HashSet<string>();
+        // ponytail: grows by one interned string per drawn object for the life
+        // of the run (a Playback rewind wipes it via ResetAll(true)); a long
+        // multi-day Playback/live session could pile up thousands of tags.
+        // Fine at that scale — add an eviction ceiling only if it measurably
+        // becomes a memory problem.
+        private int _patternSeq;
 
         private int _barSecs = 60;
         private bool _rthOnlyWarned;
@@ -251,6 +257,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 foreach (string tag in _drawTags)
                     RemoveDrawObject(tag);
                 _drawTags.Clear();
+                _patternSeq = 0;
             }
 
             // The engine owns the swing list, the consumed marks and the flag
@@ -378,6 +385,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         OvernightLow = _onLow,
                         DayOpen = Open[0],                 // this first RTH bar's open
                     });
+                    DrawZonesForSession(barStart, _engine.Levels);
 
                     _curRthDate = barStart.Date;
                     _lockout = false;                      // the daily lockout lasts until the next session
@@ -529,8 +537,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             _entryOrder = o;
             // A submission rejected in-stack already released the gate and told
             // the engine; announcing an entry that no longer exists would put a
-            // phantom trade in the log.
-            if (_entryPending)
+            // phantom trade in the log. `o.OrderState`, not `_entryPending`: an
+            // in-stack FILL clears that flag too, which would otherwise swallow
+            // the very line Replay debugging needs.
+            if (o.OrderState != OrderState.Rejected)
                 Print(string.Format(CultureInfo.InvariantCulture,
                     "{0} {1:yyyy-MM-dd HH:mm} ENTRY {2} {3} x{4} stop={5:0.##} tgt={6:0.##}",
                     Name, Time[0], sig, a.Pattern.Kind, Contracts, a.StopPrice, a.TargetPrice));
@@ -562,7 +572,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print(Name + ": add submission returned no order — gate released.");
                 return;
             }
-            if (_addPending)                               // see the ENTRY line above
+            if (o.OrderState != OrderState.Rejected)       // see the ENTRY line above
                 Print(string.Format(CultureInfo.InvariantCulture,
                     "{0} {1:yyyy-MM-dd HH:mm} ADD {2} x{3} newstop={4:0.##}",
                     Name, Time[0], sig, Contracts, a.StopPrice));
@@ -673,10 +683,103 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Lockout("daily loss " + realized.ToString("0", CultureInfo.InvariantCulture) + " USD");
         }
 
-        // Task 10 owns the body. It exists now so the executor's switch is
-        // exhaustive and drawing lands in exactly one place later.
+        // Chart-only feedback for WHY the strategy entered — semi-transparent
+        // pattern/flag geometry. NO TEXT, ever (spec decision #6): only lines
+        // and rectangles below.
         private void HandleDraw(PzAction a)
         {
+            if (ChartControl == null)              // headless Strategy Analyzer: never draw
+                return;
+
+            switch (a.Type)
+            {
+                case PzActionType.DrawPattern:
+                    DrawPattern(a.Pattern, PatternOpacityPct);
+                    break;
+                case PzActionType.DrawRejected:
+                    // Both direction slots can resolve on the same bar, so an
+                    // entry and a rejection can land in the SAME action batch —
+                    // handled independently, no exclusivity assumed here.
+                    if (DrawRejectedPatterns)
+                        DrawPattern(a.Pattern, PatternOpacityPct / 2);
+                    break;
+                case PzActionType.DrawFlag:
+                    DrawFlag(a.Flag);
+                    break;
+            }
+        }
+
+        // One line per consecutive swing pair, plus a dashed neckline segment
+        // from its first point to THIS bar's projection — the same geometry
+        // for an accepted pattern and a rejected one, just at half opacity.
+        private void DrawPattern(PatternCandidate p, int opacityPct)
+        {
+            int id = _patternSeq++;
+            Brush brush = Alpha(p.IsShort ? ShortBrush : LongBrush, opacityPct);
+            PzSwing[] sw = p.Swings;
+            for (int i = 0; i < sw.Length - 1; i++)
+                Draw.Line(this, Tag("PZ_P" + id + "_" + i), false,
+                    sw[i].Time, sw[i].Price, sw[i + 1].Time, sw[i + 1].Price,
+                    brush, DashStyleHelper.Solid, 2);
+
+            Draw.Line(this, Tag("PZ_P" + id + "_neck"), false,
+                p.NeckP1.Time, p.NeckP1.Price, Time[0], p.NecklineAt(CurrentBar),
+                brush, DashStyleHelper.Dash, 2);
+        }
+
+        // Pole line + the two flag-envelope rails, spanning to THIS bar so the
+        // add-on's geometry keeps drawing itself while the flag is still live.
+        private void DrawFlag(FlagInfo f)
+        {
+            int id = _patternSeq++;
+            Brush brush = Alpha(AddonBrush, PatternOpacityPct);
+            Draw.Line(this, Tag("PZ_F" + id + "_pole"), false,
+                f.PoleStartTime, f.PoleStartPrice, f.PoleEndTime, f.PoleEndPrice,
+                brush, DashStyleHelper.Solid, 2);
+            Draw.Line(this, Tag("PZ_F" + id + "_hi"), false,
+                f.FlagStartTime, f.FlagHigh, Time[0], f.FlagHigh,
+                brush, DashStyleHelper.Solid, 2);
+            Draw.Line(this, Tag("PZ_F" + id + "_lo"), false,
+                f.FlagStartTime, f.FlagLow, Time[0], f.FlagLow,
+                brush, DashStyleHelper.Solid, 2);
+        }
+
+        // Session S/R bands: drawn ONCE per session, right after OnSessionOpen,
+        // from the same levels the zone engine gates patterns against — fixed
+        // SlateGray because zones are context, not a directional signal.
+        private void DrawZonesForSession(DateTime sessionOpen, SessionLevels levels)
+        {
+            if (!DrawZones || ChartControl == null)
+                return;
+            double hw = ZoneHalfWidthAtr * _atr.Value;
+            DateTime sessionEnd = sessionOpen.Date.AddSeconds(_cutoffSecs);
+            string key = sessionOpen.Date.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+
+            DrawZoneBand(key, "PDH", UsePriorDayHL, levels.PriorDayHigh, hw, sessionOpen, sessionEnd);
+            DrawZoneBand(key, "PDL", UsePriorDayHL, levels.PriorDayLow, hw, sessionOpen, sessionEnd);
+            DrawZoneBand(key, "ONH", UseOvernightHL, levels.OvernightHigh, hw, sessionOpen, sessionEnd);
+            DrawZoneBand(key, "ONL", UseOvernightHL, levels.OvernightLow, hw, sessionOpen, sessionEnd);
+            DrawZoneBand(key, "PC", UsePriorClose, levels.PriorClose, hw, sessionOpen, sessionEnd);
+            DrawZoneBand(key, "OPEN", UseDayOpen, levels.DayOpen, hw, sessionOpen, sessionEnd);
+        }
+
+        private void DrawZoneBand(string key, string name, bool enabled, double level, double hw,
+            DateTime start, DateTime end)
+        {
+            if (!enabled || double.IsNaN(level))
+                return;
+            Draw.Rectangle(this, Tag("PZ_Z" + key + "_" + name), false,
+                start, level + hw, end, level - hw,
+                Brushes.SlateGray, Brushes.SlateGray, ZoneOpacityPct);
+        }
+
+        private Brush Alpha(Brush src, int pct)
+        {
+            var sc = src as SolidColorBrush;
+            Color c = sc != null ? sc.Color : Colors.Gray;
+            var b = new SolidColorBrush(Color.FromArgb((byte)(255 * pct / 100), c.R, c.G, c.B));
+            b.Freeze();
+            return b;
         }
 
         protected override void OnExecutionUpdate(Execution execution, string executionId,
@@ -1042,11 +1145,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Browsable(false)]
         public string AddonBrushSerialize { get { return Serialize.BrushToString(AddonBrush); } set { AddonBrush = Serialize.StringToBrush(value); } }
 
-        [NinjaScriptProperty, Range(5, 100)]
+        // Cosmetic dial, not an optimizable parameter (review finding): no
+        // [NinjaScriptProperty], so it never shows in the Strategy Parameters
+        // grid or a walk-forward/optimizer run — the default is the value.
+        [Range(5, 100)]
         [Display(Name = "Pattern opacity (%)", GroupName = "06. Drawing", Order = 4)]
         public int PatternOpacityPct { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100)]
+        [Range(2, 100)]
         [Display(Name = "Zone opacity (%)", GroupName = "06. Drawing", Order = 5)]
         public int ZoneOpacityPct { get; set; }
 
