@@ -94,6 +94,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         private PzAction _pendingAction, _pendingAdd;
         private string _entrySig, _addSig;
         private bool _entryPending, _addPending, _flattenPending;
+        // Assigned only AFTER Enter* returns, and read for exactly one thing:
+        // cancelling a PartFilled entry's remainder when the position it opened
+        // closes. Never used for attribution — an in-stack fill beats the
+        // assignment, which is why the handlers match on the signal name.
+        private Order _entryOrder;
+        // The CURRENT bracket legs. Their only job is to let OnOrderUpdate tell a
+        // hand-cancel from the Cancelled echo of our own cancel-replace on an add
+        // resize: the echo carries the OLD order, which is no longer either ref.
+        private Order _stopOrder, _targetOrder;
+        // Deferred hand-cancel detector — a bracket Cancelled only counts as "by
+        // hand" if the position is still open a bar later.
+        private DateTime _stopCancelAt = DateTime.MinValue, _targetCancelAt = DateTime.MinValue;
         // A tracked, bracketed position exists. Distinguishes a later partial of
         // a known order (resize) from a fill with nothing behind it (flatten).
         private bool _inTrade;
@@ -262,6 +274,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             _pendingAction = null; _pendingAdd = null;
             _entrySig = null; _addSig = null;
             _entryPending = false; _addPending = false; _flattenPending = false;
+            _entryOrder = null; _stopOrder = null; _targetOrder = null;
+            _stopCancelAt = DateTime.MinValue; _targetCancelAt = DateTime.MinValue;
             _inTrade = false;
             _dir = 0; _qty = 0; _adds = 0;
             _stopPx = 0; _targetPx = 0;
@@ -404,9 +418,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             // event that closed it, this is what catches it — a bar late, but
             // before any new entry, because it runs ahead of `canTrade`.
             CheckDailyLoss();
+            CheckBracketCancels(t);
             // One Exit call is not guaranteed to fill. This test runs on every
-            // bar, so it IS the retry loop — for the cutoff and the lockout both.
-            if ((_lockout || startSecs >= _cutoffSecs) && !flat && !_flattenPending)
+            // bar, so it IS the retry loop — for the cutoff, the lockout, and the
+            // orphan flatten. `!_inTrade` is the orphan arm: holding contracts we
+            // have no tracked trade for. The orphan flatten in OnExecutionUpdate
+            // decides from Position.MarketPosition, which may not yet include the
+            // fill that triggered it — if it no-ops there, this catches it a bar
+            // later instead of letting real contracts ride unprotected. It cannot
+            // false-trigger on a working entry: that leaves Position flat, so
+            // `!flat` is false, and on the submission bar this runs before
+            // SubmitEntry anyway.
+            if ((_lockout || startSecs >= _cutoffSecs || !_inTrade) && !flat && !_flattenPending)
                 FlattenNow();
 
             // inRth as well as inWindow: TradingStartHhmm can be set before the
@@ -449,7 +472,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 case PatternKind.TripleTop:     return "PZ_TT";
                 case PatternKind.TripleBottom:  return "PZ_TB";
                 case PatternKind.HeadShoulders: return "PZ_HS";
-                default:                        return "PZ_IHS";
+                case PatternKind.InverseHeadShoulders: return "PZ_IHS";
+                // A kind added to the core without a signal here must not fall
+                // through to some other pattern's name: the handlers attribute
+                // fills BY name, so a silent default would mis-book a real trade.
+                default: throw new ArgumentOutOfRangeException("k", k, "unmapped pattern kind");
             }
         }
 
@@ -469,16 +496,19 @@ namespace NinjaTrader.NinjaScript.Strategies
             // The engine has ALREADY moved to AwaitingEntryFill by emitting this
             // action. Refusing without telling it would strand it there for the
             // rest of the run, so every refusal path below reports the failure.
-            if (Position.MarketPosition != MarketPosition.Flat || _entryPending)
+            if (a.Pattern == null || Position.MarketPosition != MarketPosition.Flat || _entryPending)
             {
-                Print(Name + ": entry refused — not flat, or one is already working.");
+                Print(Name + ": entry refused — no pattern, not flat, or one is already working.");
                 _engine.OnEntryFailed();
                 return;
             }
 
             string sig = SigFor(a.Pattern.Kind);
-            _pendingAction = a;                            // all three BEFORE the submit
+            _pendingAction = a;                            // all BEFORE the submit
             _entrySig = sig;
+            // Cleared here so an in-stack teardown during the submit below cannot
+            // cancel the PREVIOUS trade's (already terminal) entry order.
+            _entryOrder = null;
             _entryPending = true;
             Order o = a.Type == PzActionType.EnterLong
                 ? EnterLong(0, Contracts, sig)
@@ -494,9 +524,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print(Name + ": entry submission returned no order — gate released.");
                 return;
             }
-            Print(string.Format(CultureInfo.InvariantCulture,
-                "{0} {1:yyyy-MM-dd HH:mm} ENTRY {2} {3} x{4} stop={5:0.##} tgt={6:0.##}",
-                Name, Time[0], sig, a.Pattern.Kind, Contracts, a.StopPrice, a.TargetPrice));
+            // AFTER the call, deliberately: an in-stack fill has already run the
+            // handlers by now. Only ever read to cancel a partial's remainder.
+            _entryOrder = o;
+            // A submission rejected in-stack already released the gate and told
+            // the engine; announcing an entry that no longer exists would put a
+            // phantom trade in the log.
+            if (_entryPending)
+                Print(string.Format(CultureInfo.InvariantCulture,
+                    "{0} {1:yyyy-MM-dd HH:mm} ENTRY {2} {3} x{4} stop={5:0.##} tgt={6:0.##}",
+                    Name, Time[0], sig, a.Pattern.Kind, Contracts, a.StopPrice, a.TargetPrice));
         }
 
         private void SubmitAdd(PzAction a)
@@ -525,9 +562,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print(Name + ": add submission returned no order — gate released.");
                 return;
             }
-            Print(string.Format(CultureInfo.InvariantCulture,
-                "{0} {1:yyyy-MM-dd HH:mm} ADD {2} x{3} newstop={4:0.##}",
-                Name, Time[0], sig, Contracts, a.StopPrice));
+            if (_addPending)                               // see the ENTRY line above
+                Print(string.Format(CultureInfo.InvariantCulture,
+                    "{0} {1:yyyy-MM-dd HH:mm} ADD {2} x{3} newstop={4:0.##}",
+                    Name, Time[0], sig, Contracts, a.StopPrice));
         }
 
         // BOTH legs, always together, and never before the trackers they read.
@@ -537,22 +575,60 @@ namespace NinjaTrader.NinjaScript.Strategies
         // cover every tranche instead of one pair per entry signal.
         private void SubmitExits()
         {
+            // EVERYTHING is read into locals first. The first submit can be
+            // immediately marketable and re-enter this handler chain in-stack:
+            // a stop that fills on submission runs the went-flat teardown, which
+            // zeroes _qty/_stopPx/_targetPx, and the second leg would then go out
+            // as a 0-quantity order at price 0 — an invalid-parameter error NT8
+            // can disable the strategy for.
+            int q = _qty, d = _dir;
+            double sp = _stopPx, tp = _targetPx;
             // Only the quantity is guarded, and only against the not-yet-filled
-            // case. A price term here would be a way to submit NOTHING — stop
-            // included — and hold the position silently unprotected; a price NT8
-            // dislikes is better off rejected, which OnOrderUpdate turns into a
-            // flatten. Both are set in the same block that makes _qty positive.
-            if (_qty <= 0)
+            // case. A stop-price term here would be a way to submit NOTHING and
+            // hold the position silently unprotected. `tp <= 0` is different: it
+            // is the hand-cancelled-target flag, and skipping only that leg is
+            // the point — the stop still goes out.
+            if (q <= 0)
                 return;
-            if (_dir > 0)
+            // Nulled BEFORE the submits so the replaced orders' in-stack
+            // Cancelled echoes cannot match the current refs in OnOrderUpdate.
+            _stopOrder = null; _targetOrder = null;
+            if (d > 0)
             {
-                ExitLongStopMarket(0, true, _qty, _stopPx, SigStop, "");
-                ExitLongLimit(0, true, _qty, _targetPx, SigTarget, "");
+                _stopOrder = ExitLongStopMarket(0, true, q, sp, SigStop, "");
+                if (tp > 0)
+                    _targetOrder = ExitLongLimit(0, true, q, tp, SigTarget, "");
             }
             else
             {
-                ExitShortStopMarket(0, true, _qty, _stopPx, SigStop, "");
-                ExitShortLimit(0, true, _qty, _targetPx, SigTarget, "");
+                _stopOrder = ExitShortStopMarket(0, true, q, sp, SigStop, "");
+                if (tp > 0)
+                    _targetOrder = ExitShortLimit(0, true, q, tp, SigTarget, "");
+            }
+        }
+
+        // Deferred hand-cancel detector. A bracket Cancelled event only counts as
+        // "by hand" if the position is STILL open a bar later: our own
+        // cancel-replaces are filtered by reference in OnOrderUpdate, and a
+        // closing fill's OCO cancel is wiped by the went-flat teardown first.
+        //
+        // DECISION: a hand-cancel is RESPECTED, not re-asserted. Dragging or
+        // pulling a bracket in Chart Trader is a deliberate manual override, and
+        // a strategy that silently puts it back is fighting its operator. The
+        // cost is that the position can run unprotected, so it is announced
+        // loudly rather than swallowed.
+        private void CheckBracketCancels(DateTime t)
+        {
+            if (_stopCancelAt != DateTime.MinValue && (t - _stopCancelAt).TotalSeconds >= 1)
+            {
+                _stopCancelAt = DateTime.MinValue;
+                Print(Name + ": " + SigStop + " cancelled by hand — the position is UNPROTECTED on that side.");
+            }
+            if (_targetCancelAt != DateTime.MinValue && (t - _targetCancelAt).TotalSeconds >= 1)
+            {
+                _targetCancelAt = DateTime.MinValue;
+                _targetPx = 0;                             // respect it: no add resize may resurrect the target
+                Print(Name + ": " + SigTarget + " cancelled by hand — take profit removed for this trade.");
             }
         }
 
@@ -690,8 +766,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 else
                     SubmitExits();
 
-                // The engine hears about the fill only once the protection is out.
-                if (a != null)
+                // The engine hears about the fill only once the protection is out
+                // — and only if we are STILL in the trade. The submits above can
+                // re-enter this handler in-stack (a marketable target on a bar
+                // that gapped through it, the lockout flatten) and run the
+                // went-flat teardown, which already told the engine
+                // OnPositionClosed. Reporting a fill on top of that would put the
+                // engine back InPosition while the strategy is flat, and nothing
+                // resets that state — not even OnSessionOpen — so every later
+                // pattern break would reject as "busy" for the rest of the run.
+                if (a != null && _inTrade)
                 {
                     if (isAdd)
                         _engine.OnAddFilled(price);
@@ -711,12 +795,36 @@ namespace NinjaTrader.NinjaScript.Strategies
             _flattenPending = false;
             _qty = 0;
             _adds = 0;
+            _dir = 0;
             _stopPx = 0; _targetPx = 0;
+            _stopOrder = null; _targetOrder = null;
+            // A closing fill's OCO cancel of the other leg must not be mistaken
+            // for a hand-cancel one bar from now.
+            _stopCancelAt = DateTime.MinValue; _targetCancelAt = DateTime.MinValue;
             // An add still working has nothing left to add to. It is a market
             // order so it has almost certainly filled already; if it fills after
             // this, the orphan net above flattens it.
             _addPending = false;
             _pendingAdd = null;
+
+            // A PartFilled ENTRY's remainder is a different problem: it is still
+            // working and would open a fresh naked position minutes later, alone,
+            // against a trade that is over. Kill it here (PullbackZone's
+            // CancelEntry("position_closed")) rather than let the orphan net clean
+            // up after a fill that should never have happened. `_entryPending` is
+            // exactly "the order is not terminal", so it is the right guard — and
+            // it is still true here only in that partial-remainder case.
+            if (_entryPending && _entryOrder != null)
+                CancelOrder(_entryOrder);
+            // Cleared AFTER the cancel and unconditionally: leaving the trio set
+            // is what would wedge SubmitEntry's `!_entryPending` guard shut for
+            // the rest of the run. Dropping `_entrySig` also shuts the window
+            // where a late remainder could be attributed to a LATER trade that
+            // happens to share a pattern kind.
+            _entryPending = false;
+            _pendingAction = null;
+            _entrySig = null;
+            _entryOrder = null;
 
             _engine.OnPositionClosed();
             CheckDailyLoss();
@@ -739,16 +847,33 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (n == SigStop || n == SigTarget)
             {
-                // Cancelled here is almost always the echo of our own
-                // cancel-replace on an add, which is why no order references are
-                // kept to compare against — the state itself separates them.
-                // Rejected is never an echo: it means a live position just lost a
-                // bracket leg, and unprotected is not a state this strategy holds.
-                if (orderState == OrderState.Rejected
-                    && Position.MarketPosition != MarketPosition.Flat && !_flattenPending)
+                // Events for orders that are not the CURRENT references are
+                // echoes of our own cancel-replaces on an add resize — ignored
+                // wholesale. The time-based detector below cannot do this job on
+                // its own: a resize cancel and its replacement happen at the same
+                // instant with the position still open a bar later, so it would
+                // read every add as a hand-cancel and pull the target.
+                if (!ReferenceEquals(order, _stopOrder) && !ReferenceEquals(order, _targetOrder))
+                    return;
+                // Rejected is never an echo: a live position just lost a bracket
+                // leg, and unprotected is not a state this strategy holds.
+                if (orderState == OrderState.Rejected)
                 {
-                    Print(Name + ": " + n + " REJECTED (" + error + ") — position unprotected, flattening.");
-                    FlattenNow();
+                    if (Position.MarketPosition != MarketPosition.Flat && !_flattenPending)
+                    {
+                        Print(Name + ": " + n + " REJECTED (" + error + ") — position unprotected, flattening.");
+                        FlattenNow();
+                    }
+                    return;
+                }
+                // Stamp only; CheckBracketCancels decides a bar later, once a
+                // closing fill has had the chance to wipe it.
+                if (orderState == OrderState.Cancelled
+                    && Position.MarketPosition != MarketPosition.Flat
+                    && !_flattenPending && !_lockout)
+                {
+                    if (n == SigStop) _stopCancelAt = time;
+                    else _targetCancelAt = time;
                 }
                 return;
             }
