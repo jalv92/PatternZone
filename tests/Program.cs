@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using PatternZoneCore;
 
 namespace PatternZone.Tests
 {
@@ -23,8 +25,49 @@ namespace PatternZone.Tests
         {
             // Each task appends its suite here.
             T.Check(true, "smoke");
+            CoreTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
+        }
+    }
+
+    public static class CoreTests
+    {
+        static PzBar B(double o, double h, double l, double c)
+        {
+            return new PzBar { Time = new DateTime(2026, 8, 12, 9, 30, 0), Open = o, High = h, Low = l, Close = c };
+        }
+
+        public static void Run()
+        {
+            Console.WriteLine("CoreTests");
+
+            // Wilder ATR: bar0 seed = h-l; bar1 = mean of tr0,tr1.
+            var atr = new WilderAtr(14);
+            atr.Update(B(100, 102, 100, 101));            // tr0 = 2
+            T.CheckClose(atr.Value, 2.0, "atr seed");
+            atr.Update(B(101, 105, 101, 104));            // tr1 = max(4, |105-101|, |101-101|) = 4
+            T.CheckClose(atr.Value, 3.0, "atr running mean");
+
+            // SwingDetector strength 2: V shape confirms a swing low 2 bars later.
+            var sd = new SwingDetector(2);
+            double[] closes = { 105, 104, 100, 104, 105 };  // low pivot at index 2
+            List<PzSwing> got = null;
+            for (int i = 0; i < closes.Length; i++)
+            {
+                var r = sd.Update(B(closes[i], closes[i] + 0.5, closes[i] - 0.5, closes[i]), i);
+                if (r.Count > 0) got = r;
+            }
+            T.Check(got != null && got.Count == 1 && !got[0].IsHigh, "swing low confirmed");
+            T.CheckClose(got[0].Price, 99.5, "swing low price");   // low of bar 2
+            T.Check(got[0].BarIndex == 2, "swing low bar index");
+
+            // Non-unique extreme (two equal highs in window) confirms nothing.
+            var sd2 = new SwingDetector(1);
+            sd2.Update(B(100, 103, 99, 100), 0);
+            sd2.Update(B(100, 103, 99, 100), 1);
+            var r2 = sd2.Update(B(100, 101, 99, 100), 2);
+            T.Check(r2.Count == 0, "tied extreme rejected");
         }
     }
 }
