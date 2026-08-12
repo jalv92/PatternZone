@@ -208,9 +208,9 @@ namespace PatternZone.Tests
 
         // One hand-shaped bar: flag bars need a range tighter than Wander's
         // fixed 2.0, which is exactly FlagRangeMaxAtr * atr (would re-anchor).
-        static List<PzAction> One(PzEngine e, double o, double h, double l, double c)
+        static List<PzAction> One(PzEngine e, double o, double h, double l, double c, double atrOverride = 2.0)
         {
-            var r = Feed(e, o, h, l, c);
+            var r = Feed(e, o, h, l, c, true, atrOverride);
             _bar++;
             return r;
         }
@@ -342,6 +342,32 @@ namespace PatternZone.Tests
             var recovered = Wander(eAdd, MAt110);
             recovered.AddRange(Wander(eAdd, 98, 97));
             T.Check(Find(recovered, PzActionType.EnterShort) != null, "trading recovers after OnAddFailed");
+
+            // --- Unready ATR (warmup): every gate is ATR-scaled, so both action
+            // paths sit out the bar. (a) the M arms normally, then its break bar
+            // arrives with atr 0 -> nothing at all. The break still resolved the
+            // candidate, so a later healthy bar below the neckline is silent too.
+            var eAtr = Fresh(new PzConfig { SwingStrength = 2 });
+            Wander(eAtr, new List<double>(MAt110).GetRange(0, 20).ToArray());   // arms at bar 17, no break yet
+            var atrZero = One(eAtr, 99.4, 100.4, 98.4, 99.4, 0.0);
+            T.Check(atrZero.Count == 0, "unready ATR emits nothing on the break bar");
+            var afterAtr = One(eAtr, 99.0, 100.0, 98.0, 99.0);
+            T.Check(afterAtr.Count == 0, "the break consumed the candidate even at atr 0");
+
+            // (b) same guard on the add path: a formed pole+flag whose trigger
+            // bar carries atr 0 adds nothing, and the detector is only skipped —
+            // the next healthy bar with the same shape still fires the add.
+            var eAtrAdd = Fresh(new PzConfig { SwingStrength = 2 });
+            Wander(eAtrAdd, MAt110);
+            eAtrAdd.OnEntryFilled(99.4);
+            Wander(eAtrAdd, 97, 95, 94);
+            One(eAtrAdd, 94, 94.8, 93.6, 94.4);
+            One(eAtrAdd, 94.4, 94.9, 93.8, 94.2);
+            One(eAtrAdd, 94.2, 94.7, 93.7, 94.0);
+            var addAtrZero = One(eAtrAdd, 94.0, 94.1, 92.8, 93.2, 0.0);
+            T.Check(Find(addAtrZero, PzActionType.AddShort) == null, "unready ATR emits no add");
+            var addAfter = One(eAtrAdd, 94.0, 94.1, 92.8, 93.2);
+            T.Check(Find(addAfter, PzActionType.AddShort) != null, "add fires once ATR is ready again");
 
             // --- canTrade false: the shell already knows why, so nothing at all
             // is emitted (not even a rejection).

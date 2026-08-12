@@ -760,6 +760,12 @@ namespace PatternZoneCore
 
         private void Fire(PatternCandidate c, PzBar bar, double neckline, double atr, bool canTrade, List<PzAction> actions)
         {
+            // Every gate below is ATR-scaled: at atr <= 0 the min-height filter
+            // passes trivially, the zone band collapses to the level itself and
+            // the stop buffer vanishes. Warmup is not a trade setup — drop it
+            // silently, like the canTrade case.
+            if (atr <= 0)
+                return;
             if (_state != PzState.Flat)
             {
                 actions.Add(Reject(c, "busy"));
@@ -811,6 +817,8 @@ namespace PatternZoneCore
 
         private void UpdateFlags(PzBar bar, double atr, bool canTrade, List<PzAction> actions)
         {
+            if (atr <= 0)
+                return;                              // same warmup guard as Fire: pole, envelope and guard are all ATR-scaled
             if (_state != PzState.InPosition || !_cfg.EnableFlagAddon || _adds >= _cfg.MaxAdds)
                 return;
 
