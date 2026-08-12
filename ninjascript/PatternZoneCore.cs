@@ -542,4 +542,286 @@ namespace PatternZoneCore
             };
         }
     }
+
+    public enum PzActionType { EnterLong, EnterShort, AddLong, AddShort, DrawPattern, DrawFlag, DrawRejected }
+
+    public sealed class PzAction
+    {
+        public PzActionType Type;
+        public double StopPrice, TargetPrice;    // Enter*: initial bracket. Add*: StopPrice = new AGGREGATE stop.
+        public PatternCandidate Pattern;         // Enter* + DrawPattern + DrawRejected
+        public FlagInfo Flag;                    // Add* + DrawFlag
+        // DrawRejected: "zone" | "height" | "busy" | "session_cap" | "flag_no_position".
+        // The last one is unreachable here by construction (spec §7/rule 8: the
+        // flag detector is only ever armed while in position), so no branch
+        // below emits it — it stays in the shell's vocabulary, not the engine's.
+        public string RejectReason;
+    }
+
+    // The brain: swings -> alternating list -> pattern candidates -> neckline
+    // break -> permission gauntlet -> typed actions the shell executes. Owns no
+    // NT8 concepts and no ATR: the shell feeds one closed bar plus the ATR value
+    // and whether trading is allowed, and reports fills back through On*.
+    public sealed class PzEngine
+    {
+        private enum PzState { Flat, AwaitingEntryFill, InPosition, AwaitingAddFill }
+
+        private const int MaxRetainedSwings = 40;
+
+        private readonly PzConfig _cfg;
+        private readonly SwingDetector _swingDetector;
+        private readonly ZoneEngine _zones;
+        private readonly FlagDetector _flags;
+        private readonly List<PzSwing> _alt = new List<PzSwing>();
+        // Swings that belonged to a pattern that actually entered; they can
+        // never arm anything again. Persists across sessions with _alt.
+        private readonly HashSet<long> _consumed = new HashSet<long>();
+
+        private PatternCandidate _armedLong, _armedShort;
+        private PzState _state = PzState.Flat;
+        private int _barIndex = -1;
+        private int _trades;
+        private int _adds;
+        private int _dir;              // open trade direction: +1 long, -1 short
+        private double _target;        // open trade target, for the add-on guard
+
+        public PzEngine(PzConfig cfg)
+        {
+            _cfg = cfg;
+            _swingDetector = new SwingDetector(cfg.SwingStrength);
+            _zones = new ZoneEngine(cfg);
+            _flags = new FlagDetector(cfg);
+        }
+
+        public SessionLevels Levels { get { return _zones.Levels; } }
+
+        // Swings, consumed marks and the ATR recursion (shell-side) cross the
+        // session boundary — structure does not restart at the open.
+        public void OnSessionOpen(SessionLevels levels)
+        {
+            _zones.SetLevels(levels);
+            _trades = 0;
+            _armedLong = null;
+            _armedShort = null;
+            _flags.Disarm();
+            _adds = 0;
+        }
+
+        public List<PzAction> OnBarClosed(PzBar bar, double atr, bool canTrade)
+        {
+            _barIndex++;
+            var actions = new List<PzAction>();
+
+            foreach (PzSwing s in _swingDetector.Update(bar, _barIndex))
+                if (Integrate(s))
+                    Arm(atr);
+
+            Resolve(ref _armedShort, bar, atr, canTrade, actions);
+            Resolve(ref _armedLong, bar, atr, canTrade, actions);
+            UpdateFlags(bar, atr, canTrade, actions);
+            return actions;
+        }
+
+        public void OnEntryFilled(double fillPrice)
+        {
+            _state = PzState.InPosition;
+            _adds = 0;
+            if (_cfg.EnableFlagAddon && _cfg.MaxAdds > 0)
+                _flags.Arm(_dir, fillPrice, _barIndex);
+        }
+
+        // The detector re-anchors itself on trigger, which is only safe because
+        // the engine disarms it the moment an add is emitted: re-arming here on
+        // the actual fill is the single place the pole may start from.
+        public void OnAddFilled(double fillPrice)
+        {
+            _adds++;
+            _state = PzState.InPosition;
+            if (_adds < _cfg.MaxAdds)
+                _flags.Arm(_dir, fillPrice, _barIndex);
+            else
+                _flags.Disarm();
+        }
+
+        // Submission rejected: back to flat. The pattern's swings stay consumed
+        // on purpose — a failed submission must not re-fire the same structure.
+        public void OnEntryFailed()
+        {
+            _state = PzState.Flat;
+            _flags.Disarm();
+        }
+
+        public void OnPositionClosed()
+        {
+            _state = PzState.Flat;
+            _flags.Disarm();
+            _adds = 0;
+        }
+
+        // Alternation: same-type in a row collapses to the more extreme one, in
+        // place, so the tail the scanners read is always e,v,e,v,e. Returns
+        // whether the list changed (a rejected duplicate can't arm anything).
+        private bool Integrate(PzSwing s)
+        {
+            if (_alt.Count > 0 && _alt[_alt.Count - 1].IsHigh == s.IsHigh)
+            {
+                PzSwing last = _alt[_alt.Count - 1];
+                bool moreExtreme = s.IsHigh ? s.Price > last.Price : s.Price < last.Price;
+                if (!moreExtreme)
+                    return false;
+                _alt[_alt.Count - 1] = s;
+                return true;
+            }
+            _alt.Add(s);
+            if (_alt.Count > MaxRetainedSwings)
+                _alt.RemoveAt(0);
+            return true;
+        }
+
+        private void Arm(double atr)
+        {
+            PatternCandidate c = Scan(atr);
+            if (c == null)
+                return;
+            c.ArmedBarIndex = _barIndex;
+            if (c.IsShort)
+                _armedShort = c;
+            else
+                _armedLong = c;
+        }
+
+        // Most specific first. A match built on a consumed swing is skipped
+        // rather than fatal: the same tail often yields a triple whose first
+        // extreme was already traded and a double that is entirely fresh.
+        private PatternCandidate Scan(double atr)
+        {
+            PatternCandidate c = PatternScanner.TryTriple(_alt, _cfg, atr);
+            if (IsFresh(c))
+                return c;
+            c = PatternScanner.TryHeadShoulders(_alt, _cfg, atr);
+            if (IsFresh(c))
+                return c;
+            c = PatternScanner.TryDouble(_alt, _cfg, atr);
+            return IsFresh(c) ? c : null;
+        }
+
+        private bool IsFresh(PatternCandidate c)
+        {
+            if (c == null)
+                return false;
+            foreach (PzSwing s in c.Swings)
+                if (_consumed.Contains(SwingKey(s)))
+                    return false;
+            return true;
+        }
+
+        private static long SwingKey(PzSwing s)
+        {
+            return (long)s.BarIndex * 4 + (s.IsHigh ? 1 : 0);
+        }
+
+        // Expiry and the break test, both on every closed bar including the
+        // arming one. Either way the slot is freed: a resolved candidate never
+        // re-fires, and a rejected one must not re-reject on every later bar.
+        private void Resolve(ref PatternCandidate slot, PzBar bar, double atr, bool canTrade, List<PzAction> actions)
+        {
+            PatternCandidate c = slot;
+            if (c == null)
+                return;
+
+            bool failed = c.IsShort ? bar.Close > c.ExtremePrice : bar.Close < c.ExtremePrice;
+            if (failed || _barIndex - c.Swings[0].BarIndex > _cfg.MaxPatternBars)
+            {
+                slot = null;
+                return;
+            }
+
+            double neckline = c.NecklineAt(_barIndex);
+            double breakBuffer = _cfg.NecklineBreakTicks * _cfg.TickSize;
+            bool broke = c.IsShort
+                ? bar.Close <= neckline - breakBuffer
+                : bar.Close >= neckline + breakBuffer;
+            if (!broke)
+                return;
+
+            slot = null;
+            Fire(c, bar, neckline, atr, canTrade, actions);
+        }
+
+        private void Fire(PatternCandidate c, PzBar bar, double neckline, double atr, bool canTrade, List<PzAction> actions)
+        {
+            if (_state != PzState.Flat)
+            {
+                actions.Add(Reject(c, "busy"));
+                return;
+            }
+            if (!canTrade)
+                return;                              // lockout / window: the shell already knows why
+            if (_trades >= _cfg.MaxTradesPerSession)
+            {
+                actions.Add(Reject(c, "session_cap"));
+                return;
+            }
+
+            double height = Math.Abs(c.ExtremePrice - neckline);
+            if (height < _cfg.MinPatternHeightAtr * atr)
+            {
+                actions.Add(Reject(c, "height"));
+                return;
+            }
+            double zoneLevel;
+            if (!_zones.Permits(c, atr, out zoneLevel))
+            {
+                actions.Add(Reject(c, "zone"));
+                return;
+            }
+
+            int dirSign = c.IsShort ? -1 : 1;
+            actions.Add(new PzAction
+            {
+                Type = c.IsShort ? PzActionType.EnterShort : PzActionType.EnterLong,
+                Pattern = c,
+                StopPrice = c.ExtremePrice - dirSign * _cfg.StopBufferAtr * atr,
+                TargetPrice = neckline + dirSign * height * _cfg.TargetMultiple,
+            });
+            actions.Add(new PzAction { Type = PzActionType.DrawPattern, Pattern = c });
+
+            foreach (PzSwing s in c.Swings)
+                _consumed.Add(SwingKey(s));
+            _trades++;
+            _dir = dirSign;
+            _target = actions[actions.Count - 2].TargetPrice;
+            _state = PzState.AwaitingEntryFill;
+        }
+
+        private static PzAction Reject(PatternCandidate c, string reason)
+        {
+            return new PzAction { Type = PzActionType.DrawRejected, Pattern = c, RejectReason = reason };
+        }
+
+        private void UpdateFlags(PzBar bar, double atr, bool canTrade, List<PzAction> actions)
+        {
+            if (_state != PzState.InPosition || !_cfg.EnableFlagAddon || _adds >= _cfg.MaxAdds)
+                return;
+
+            FlagInfo f = _flags.Update(bar, _barIndex, atr);
+            if (f == null || !canTrade)
+                return;
+            if (_dir * (_target - bar.Close) < _cfg.MinDistToTargetAtr * atr)
+                return;                              // too little room left to be worth a tranche
+
+            actions.Add(new PzAction
+            {
+                Type = _dir > 0 ? PzActionType.AddLong : PzActionType.AddShort,
+                Flag = f,
+                StopPrice = _dir > 0
+                    ? f.FlagLow - _cfg.StopBufferAtr * atr
+                    : f.FlagHigh + _cfg.StopBufferAtr * atr,
+                TargetPrice = _target,               // unchanged: every tranche exits together
+            });
+            actions.Add(new PzAction { Type = PzActionType.DrawFlag, Flag = f });
+            _flags.Disarm();
+            _state = PzState.AwaitingAddFill;
+        }
+    }
 }

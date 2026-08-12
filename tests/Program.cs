@@ -30,6 +30,7 @@ namespace PatternZone.Tests
             TripleHsTests.Run();
             ZoneTests.Run();
             FlagTests.Run();
+            EngineTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
         }
@@ -144,6 +145,182 @@ namespace PatternZone.Tests
             var ihs = new List<PzSwing> { S(0,112,true), S(5,104,false), S(8,107,true), S(12,102,false), S(15,106,true), S(20,103.8,false) };
             var hi = PatternScanner.TryHeadShoulders(ihs, cfg, atr);
             T.Check(hi != null && hi.Kind == PatternKind.InverseHeadShoulders && !hi.IsShort, "inverse H&S found");
+        }
+    }
+
+    public static class EngineTests
+    {
+        static int _bar;
+
+        // Wander bars are H = c+1, L = c-1, so with SwingStrength 2 a swing
+        // confirms exactly where the close series has a STRICT local extreme of
+        // radius 2 (the detector's strict-unique window test reduces to that
+        // when every bar has the same shape), a swing high prices at close+1 and
+        // a swing low at close-1. Every sequence below is scripted against that.
+        //
+        // M into 110 with a deep valley: top1 high 110.0 (bar 6, confirms 8),
+        // valley low 100.0 (bar 10, confirms 12), top2 high 110.2 (bar 15,
+        // confirms 17 -> arms the double top), then closes fall through the
+        // neckline: 99.4 <= 100.0 - NecklineBreakTicks*TickSize (0.5) on bar 20.
+        // Height 10.2 clears MinPatternHeightAtr*atr (3.0) and both tops sit
+        // inside the PDH-110 band (+/- ZoneHalfWidthAtr*atr = 1.0).
+        static readonly double[] MAt110 = {
+            100, 101, 102, 103, 105, 107, 109,
+            108, 105, 103, 101,
+            102, 104, 106, 108, 109.2,
+            108, 106, 103, 100.5, 99.4
+        };
+
+        // Same M, shallow valley: top1 110.0 (bar 5), valley 107.5 (bar 8),
+        // top2 110.2 (bar 12), break on bar 16 (106.8 <= 107.5 - 0.5).
+        // Height 2.7 < 3.0 -> rejected on height BEFORE the zone test, even
+        // though both tops sit on PDH 110.
+        static readonly double[] ShortMAt110 = {
+            105, 106, 107, 108, 108.7, 109, 108.8, 108.6, 108.5,
+            108.55, 108.7, 108.9, 109.2, 109.0, 108.6, 107.9, 106.8
+        };
+
+        static double[] Shift(double[] closes, double delta)
+        {
+            var r = new double[closes.Length];
+            for (int i = 0; i < closes.Length; i++)
+                r[i] = closes[i] + delta;
+            return r;
+        }
+
+        static List<PzAction> Feed(PzEngine e, double o, double h, double l, double c, bool canTrade = true, double atrOverride = 2.0)
+        {
+            var b = new PzBar { Time = new DateTime(2026, 8, 12, 9, 30, 0).AddMinutes(_bar), Open = o, High = h, Low = l, Close = c };
+            return e.OnBarClosed(b, atrOverride, canTrade);
+        }
+
+        static List<PzAction> Wander(PzEngine e, params double[] closes)
+        {
+            return Wander(e, true, closes);
+        }
+
+        static List<PzAction> Wander(PzEngine e, bool canTrade, double[] closes)
+        {
+            var all = new List<PzAction>();
+            foreach (double c in closes) { all.AddRange(Feed(e, c, c + 1, c - 1, c, canTrade)); _bar++; }
+            return all;
+        }
+
+        // One hand-shaped bar: flag bars need a range tighter than Wander's
+        // fixed 2.0, which is exactly FlagRangeMaxAtr * atr (would re-anchor).
+        static List<PzAction> One(PzEngine e, double o, double h, double l, double c)
+        {
+            var r = Feed(e, o, h, l, c);
+            _bar++;
+            return r;
+        }
+
+        static PzAction Find(List<PzAction> acts, PzActionType type)
+        {
+            return acts.Find(x => x.Type == type);
+        }
+
+        static PzAction Rejected(List<PzAction> acts, string reason)
+        {
+            return acts.Find(x => x.Type == PzActionType.DrawRejected && x.RejectReason == reason);
+        }
+
+        static PzEngine Fresh(PzConfig cfg)
+        {
+            _bar = 0;
+            var e = new PzEngine(cfg);
+            e.OnSessionOpen(new SessionLevels { PriorDayHigh = 110.0 });
+            return e;
+        }
+
+        public static void Run()
+        {
+            Console.WriteLine("EngineTests");
+            var cfg = new PzConfig { SwingStrength = 2 };
+            var e = Fresh(cfg);
+            T.CheckClose(e.Levels.PriorDayHigh, 110.0, "levels pass-through");
+
+            // --- Entry: one M at PDH 110 -> exactly one short, drawn once.
+            var acts = Wander(e, MAt110);
+            int enters = 0, draws = 0;
+            foreach (var a in acts) { if (a.Type == PzActionType.EnterShort) enters++; if (a.Type == PzActionType.DrawPattern) draws++; }
+            T.Check(enters == 1, "one EnterShort");
+            T.Check(draws == 1, "one DrawPattern");
+            T.Check(Find(acts, PzActionType.DrawRejected) == null, "clean entry rejects nothing");
+
+            PzAction ent = Find(acts, PzActionType.EnterShort);
+            T.Check(ent.Pattern != null && ent.Pattern.IsShort, "action carries pattern");
+            T.Check(ent.StopPrice > ent.Pattern.ExtremePrice, "stop beyond extreme");
+            T.Check(ent.TargetPrice < ent.Pattern.NecklineAt(_bar), "target below neckline");
+            T.CheckClose(ent.StopPrice, 111.2, "stop = extreme + StopBufferAtr*atr");
+            T.CheckClose(ent.TargetPrice, 89.8, "target = neckline - height*TargetMultiple");
+
+            // --- Flag add-on, anchored on the fill (99.4 @ bar 20).
+            e.OnEntryFilled(99.4);
+            var pole = Wander(e, 97, 95, 94);                       // pole low 93: 6.4 >= PoleMinAtr*atr (4.0)
+            T.Check(Find(pole, PzActionType.AddShort) == null, "no add while the pole runs");
+            One(e, 94, 94.8, 93.6, 94.4);                           // flag bar 1
+            One(e, 94.4, 94.9, 93.8, 94.2);                         // flag bar 2
+            var flag3 = One(e, 94.2, 94.7, 93.7, 94.0);             // flag bar 3 (FlagMinBars)
+            T.Check(Find(flag3, PzActionType.AddShort) == null, "no add while the flag builds");
+            var brk = One(e, 94.0, 94.1, 92.8, 93.2);               // 93.2 <= flagLow 93.6 - tick
+            PzAction add = Find(brk, PzActionType.AddShort);
+            T.Check(add != null, "AddShort emitted");
+            T.Check(add.Flag != null && add.StopPrice > add.Flag.FlagHigh, "aggregate stop beyond flag");
+            T.CheckClose(add.StopPrice, 95.9, "aggregate stop = flag high + StopBufferAtr*atr");
+            T.Check(Find(brk, PzActionType.DrawFlag) != null, "DrawFlag rides with the add");
+            e.OnAddFilled(93.2);
+
+            // --- MaxAdds = 1: a second flag adds nothing.
+            var more = Wander(e, 91.5, 90, 89, 89.2, 89.4, 89.1, 88.0);
+            T.Check(Find(more, PzActionType.AddShort) == null, "MaxAdds respected");
+
+            // --- Busy: the same M ten points lower would enter if we were flat
+            // (height 10.2, tops on the round-100 level) -> rejected as busy.
+            var busy = Wander(e, Shift(MAt110, -10));
+            T.Check(Find(busy, PzActionType.EnterShort) == null, "no second entry while in position");
+            T.Check(Rejected(busy, "busy") != null, "busy rejection");
+            e.OnPositionClosed();
+
+            // --- Zone: same M four points lower -> tops at 106 touch no level
+            // (PDH 110 and round-100 are both > 1.0 away). Height still passes,
+            // so the reason must be the zone.
+            var eZone = Fresh(new PzConfig { SwingStrength = 2 });
+            var zoneActs = Wander(eZone, Shift(MAt110, -4));
+            T.Check(Find(zoneActs, PzActionType.EnterShort) == null, "out-of-zone M does not enter");
+            T.Check(Rejected(zoneActs, "zone") != null, "zone rejection");
+
+            // --- Height: M on PDH 110 but only 2.7 tall.
+            var eHeight = Fresh(new PzConfig { SwingStrength = 2 });
+            var heightActs = Wander(eHeight, ShortMAt110);
+            T.Check(Find(heightActs, PzActionType.EnterShort) == null, "under-height M does not enter");
+            T.Check(Rejected(heightActs, "height") != null, "height rejection");
+
+            // --- Session cap: MaxTradesPerSession 1, flat again, second M rejects.
+            var eCap = Fresh(new PzConfig { SwingStrength = 2, MaxTradesPerSession = 1 });
+            var first = Wander(eCap, MAt110);
+            T.Check(Find(first, PzActionType.EnterShort) != null, "first entry of the capped session");
+            eCap.OnEntryFilled(99.4);
+            eCap.OnPositionClosed();
+            var second = Wander(eCap, MAt110);
+            T.Check(Find(second, PzActionType.EnterShort) == null, "capped session does not enter again");
+            T.Check(Rejected(second, "session_cap") != null, "session_cap rejection");
+
+            // --- canTrade false: the shell already knows why, so nothing at all
+            // is emitted (not even a rejection).
+            var eLocked = Fresh(new PzConfig { SwingStrength = 2 });
+            var locked = Wander(eLocked, false, MAt110);
+            T.Check(locked.Count == 0, "canTrade=false emits nothing");
+
+            // --- OnSessionOpen resets the trade count but keeps the structure:
+            // the third M arms a TRIPLE top off swings the capped session left
+            // behind (rejected patterns consume nothing), so its neckline is the
+            // worst of the two valleys (98.4) and the break needs two more bars.
+            eCap.OnSessionOpen(new SessionLevels { PriorDayHigh = 110.0 });
+            var third = Wander(eCap, MAt110);
+            third.AddRange(Wander(eCap, 98, 97));
+            T.Check(Find(third, PzActionType.EnterShort) != null, "new session re-opens the trade budget");
+            T.Check(Rejected(third, "session_cap") == null, "no session_cap after the reset");
         }
     }
 
