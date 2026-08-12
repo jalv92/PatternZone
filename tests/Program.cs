@@ -141,6 +141,19 @@ namespace PatternZone.Tests
             var hs2 = new List<PzSwing> { S(0,100,false), S(5,108,true), S(8,105,false), S(12,108.5,true), S(15,106,false), S(20,108.3,true) };
             T.Check(PatternScanner.TryHeadShoulders(hs2, cfg, atr) == null, "prominence rejects");
 
+            // Amendment 3: the lead-in swing is captured for drawing — the swing
+            // before Swings[0], opposite-type by alternation. Same tail as the
+            // H&S above, so the preceding low at bar 0 is index Count-6.
+            T.Check(h.HasLeadIn && h.LeadInSwing.BarIndex == 0 && !h.LeadInSwing.IsHigh, "HS lead-in is the prior low");
+            T.CheckClose(h.LeadInSwing.Price, 100.0, "HS lead-in price");
+            var dtLead = PatternScanner.TryDouble(hs, cfg, atr);   // last 3 of the same list: (12,110,hi),(15,106,lo),(20,108.3,hi)
+            T.Check(dtLead == null || dtLead.LeadInSwing.BarIndex == 8, "double lead-in is the swing before its first top");
+
+            // Only the defining swings in the list -> no lead-in, and the
+            // drawing omits that segment rather than inventing a point.
+            var bare = new List<PzSwing> { S(0, 100, false), S(10, 110, true), S(15, 105, false), S(20, 110.3, true) };
+            T.Check(PatternScanner.TryDouble(bare.GetRange(1, 3), cfg, atr).HasLeadIn == false, "no lead-in when the list is only the defining swings");
+
             // Inverse H&S mirrors to long.
             var ihs = new List<PzSwing> { S(0,112,true), S(5,104,false), S(8,107,true), S(12,102,false), S(15,106,true), S(20,103.8,false) };
             var hi = PatternScanner.TryHeadShoulders(ihs, cfg, atr);

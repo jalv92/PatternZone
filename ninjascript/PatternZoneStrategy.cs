@@ -17,7 +17,7 @@
 //
 // ATR: PatternZoneCore.WilderAtr(14), hand-rolled and fed from OnBarUpdate —
 // nt8c cannot resolve the ATR() system wrapper (workspace gotcha) and the core's
-// recursion is the one the 137 unit tests pin. It crosses sessions and never
+// recursion is the one the 141 unit tests pin. It crosses sessions and never
 // resets, so `canTrade` also gates on 14 fed bars: the engine's internal
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
@@ -26,7 +26,7 @@
 // every tranche (fromEntrySignal = "", live-until-cancelled, both legs always
 // resubmitted together), adds that re-price the stop only, a realized daily-loss
 // lockout and a window flatten. Drawing is pattern/flag geometry only — no
-// neckline, no text (Amendment 1 + spec decision #6).
+// neckline, no text; full legs incl. lead-in/out (Amendments 1+3, decision #6).
 //
 // THE ORDER-EVENT RACE RULES THIS FILE. NT8 — Playback especially — can deliver
 // OnOrderUpdate/OnExecutionUpdate synchronously, in-stack, BEFORE the Enter*/
@@ -763,10 +763,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             int id = _patternSeq++;
             Brush brush = Alpha(p.IsShort ? ShortBrush : LongBrush, opacityPct);
             PzSwing[] sw = p.Swings;
+            // Amendment 3: the legs, so a W reads as a W and not as a V with a
+            // roof. Lead-in from the prior opposite swing; lead-out to THIS bar,
+            // which is the break bar the action fired on.
+            if (p.HasLeadIn)
+                Draw.Line(this, Tag("PZ_P" + id + "_in"), false,
+                    p.LeadInSwing.Time, p.LeadInSwing.Price, sw[0].Time, sw[0].Price,
+                    brush, DashStyleHelper.Solid, PatternLineWidth);
             for (int i = 0; i < sw.Length - 1; i++)
                 Draw.Line(this, Tag("PZ_P" + id + "_" + i), false,
                     sw[i].Time, sw[i].Price, sw[i + 1].Time, sw[i + 1].Price,
                     brush, DashStyleHelper.Solid, PatternLineWidth);
+            Draw.Line(this, Tag("PZ_P" + id + "_out"), false,
+                sw[sw.Length - 1].Time, sw[sw.Length - 1].Price, Time[0], Close[0],
+                brush, DashStyleHelper.Solid, PatternLineWidth);
         }
 
         // Pole line + the two flag-envelope rails. One-shot: fired once, at

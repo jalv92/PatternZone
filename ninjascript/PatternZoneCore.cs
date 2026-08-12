@@ -135,6 +135,12 @@ namespace PatternZoneCore
         // Amendment 2: was there a trend to reverse? Evaluated ONCE, at
         // creation, against the history behind the first defining swing.
         public bool TrendOk;
+        // Amendment 3, drawing only: the swing before Swings[0] — opposite-type
+        // by alternation, so it is the real origin of the leg INTO the pattern.
+        // False when the list had no such swing; the drawing omits the segment
+        // rather than inventing a point.
+        public bool HasLeadIn;
+        public PzSwing LeadInSwing;
         // Neckline as a 2-point line; equal points => horizontal.
         public PzSwing NeckP1, NeckP2;
         public double[] ZoneExtremes;        // prices that must touch a zone (2 tops, 3 tops, or head)
@@ -276,6 +282,8 @@ namespace PatternZoneCore
                 NeckP1 = b,
                 NeckP2 = b,
                 ZoneExtremes = new[] { a.Price, c.Price },
+                HasLeadIn = swings.Count >= 4,
+                LeadInSwing = swings.Count >= 4 ? swings[swings.Count - 4] : default(PzSwing),
             };
         }
 
@@ -314,6 +322,8 @@ namespace PatternZoneCore
                 NeckP1 = worst,
                 NeckP2 = worst,
                 ZoneExtremes = new[] { e1.Price, e2.Price, e3.Price },
+                HasLeadIn = n >= 6,
+                LeadInSwing = n >= 6 ? swings[n - 6] : default(PzSwing),
             };
         }
 
@@ -350,6 +360,8 @@ namespace PatternZoneCore
                 NeckP1 = v1,
                 NeckP2 = v2,
                 ZoneExtremes = new[] { e2.Price },
+                HasLeadIn = n >= 6,
+                LeadInSwing = n >= 6 ? swings[n - 6] : default(PzSwing),
             };
         }
     }

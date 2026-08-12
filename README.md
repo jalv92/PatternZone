@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/edge-not%20measured-lightgrey?style=flat-square" alt="edge: not measured">
   <img src="https://img.shields.io/badge/platform-NinjaTrader%208-1f6feb?style=flat-square" alt="platform: NinjaTrader 8">
   <img src="https://img.shields.io/badge/instrument-MNQ%201m-f7931a?style=flat-square" alt="instrument: MNQ 1-minute">
-  <img src="https://img.shields.io/badge/tests-137%20passing-brightgreen?style=flat-square" alt="tests: 137 passing">
+  <img src="https://img.shields.io/badge/tests-141%20passing-brightgreen?style=flat-square" alt="tests: 141 passing">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
@@ -38,7 +38,7 @@ Nothing on this page is a claim about profitability.
 
 | Phase | What it establishes | Status |
 |---|---|---|
-| Unit tests | The detection and decision core behaves as specified | **137 passing** |
+| Unit tests | The detection and decision core behaves as specified | **141 passing** |
 | 1 — Visual QA | The detector sees the patterns a human sees | Pending |
 | 2 — Order-layer exercises | The order plumbing survives the events that break NT8 strategies | Pending |
 | 3 — Frozen backtest | Whether there is anything here at all | Not run |
@@ -145,8 +145,10 @@ position does nothing at all.
 the next RTH open. Forced flat at 15:55 ET.
 
 **On the chart.** Every traded pattern draws its own geometry over the candles —
-the M or W polyline, the flag's pole and rails, faint zone bands. No neckline
-(it was drawn in the first build and taken out after looking at it), and no text
+the M or W polyline **including the legs into and out of it**, the flag's pole
+and rails, faint zone bands. Without those legs a double bottom renders as a V
+with a roof; with them the shape reads the way a human draws it. No neckline (it
+was drawn in the first build and taken out after looking at it), and no text
 anywhere: the chart shows *why* it entered without becoming a dashboard.
 
 ## Install
@@ -179,9 +181,9 @@ The first trade is possible on the 15th bar (ATR warmup).
 
 **Statistical dials — frozen.** These were fixed before any P&L was seen.
 Changing one is a pre-registered amendment that earns its own out-of-sample run,
-not a tweak. Two amendments have been made so far — the stop rule and zone
-proximity allowance, then the prior-trend gate — both on 2026-08-12, both from
-watching the detector draw, and both while no P&L existed. They are written up
+not a tweak. Three amendments have been made so far — the stop rule and zone
+proximity allowance, the prior-trend gate, and the completed drawing legs — all on 2026-08-12, all from
+watching the detector draw, and all while no P&L existed. They are written up
 in [`docs/design.md`](docs/design.md#amendments).
 
 | Group | Parameters | Defaults |

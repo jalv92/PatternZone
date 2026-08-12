@@ -99,7 +99,7 @@ Armed only while a position is open (and adds remaining < `MaxAdds`):
 
 ## 8. Drawing layer (no text, ever)
 
-- **Reversal entry:** semi-transparent polyline over the defining swings (the M / W zigzag; 5-point H&S). Drawn at confirmation. **No neckline segment** (Amendment 1 — Javier does not want it on the chart).
+- **Reversal entry:** semi-transparent polyline over the defining swings (the M / W zigzag; 5-point H&S), plus the **lead-in** leg from the prior opposite swing and the **lead-out** leg to the break bar (Amendment 3), so the pattern reads as a complete shape rather than a fragment. Drawn at confirmation. **No neckline segment** (Amendment 1 — Javier does not want it on the chart).
 - **Flag add:** pole line + the two parallel channel lines of the flag.
 - **Zones:** faint horizontal bands (level ± half-width), `DrawZones` toggle. The band drawn is the half-width only; permission reaches `ZoneProximityAtr` further (§5), so a permitted extreme can sit outside the drawn band.
 - **Rejected patterns** (out-of-zone / under-height / flag-without-position): even fainter, `DrawRejectedPatterns` (default off) — audit tool for Replay.
@@ -254,3 +254,16 @@ tuning preference, which is why it is fixed rather than left for a later run.
    stop against the break close and rejects when it is not beyond the entry on
    the adverse side. Rejected, not re-anchored: a break priced past the
    pattern's own right shoulder is no longer the setup being traded.
+
+**Amendment 3 — 2026-08-12 (pre-P&L, from Phase 1 visual QA). Drawing only —
+no gate, no trade geometry.** Connecting only the defining swings drew a double
+bottom as a "V with a roof": the shape a human recognises includes the legs that
+lead into and out of it.
+
+8. **The drawn pattern now completes its legs.** A **lead-in** segment from the
+   swing immediately preceding the first defining swing (opposite-type by
+   alternation, so it is the real origin of the move into the pattern) and a
+   **lead-out** segment from the last defining swing to the break bar's close.
+   The lead-in is omitted, never invented, when the swing list did not hold that
+   preceding swing. Both use the same brush, width and opacity rules as the rest
+   of the polyline, so rejected patterns get them at half opacity too.
