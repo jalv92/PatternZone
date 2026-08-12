@@ -727,8 +727,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 brush, DashStyleHelper.Dash, 2);
         }
 
-        // Pole line + the two flag-envelope rails, spanning to THIS bar so the
-        // add-on's geometry keeps drawing itself while the flag is still live.
+        // Pole line + the two flag-envelope rails. One-shot: fired once, at
+        // the add trigger bar, with the rails ending at Time[0] of that bar —
+        // not a live redraw that tracks the flag as it builds.
         private void DrawFlag(FlagInfo f)
         {
             int id = _patternSeq++;
@@ -1145,9 +1146,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Browsable(false)]
         public string AddonBrushSerialize { get { return Serialize.BrushToString(AddonBrush); } set { AddonBrush = Serialize.StringToBrush(value); } }
 
-        // Cosmetic dial, not an optimizable parameter (review finding): no
-        // [NinjaScriptProperty], so it never shows in the Strategy Parameters
-        // grid or a walk-forward/optimizer run — the default is the value.
+        // Cosmetic dial (review finding): [NinjaScriptProperty] gates
+        // constructor-param inclusion and optimizer/walk-forward eligibility,
+        // NOT grid visibility (that's [Browsable]+[Display] — see LongBrush
+        // above, which is grid-editable with no [NinjaScriptProperty] either).
+        // Dropping it here only takes these two off the optimizable-parameter
+        // list; they stay editable in the strategy dialog and persist via
+        // standard serialization.
         [Range(5, 100)]
         [Display(Name = "Pattern opacity (%)", GroupName = "06. Drawing", Order = 4)]
         public int PatternOpacityPct { get; set; }
