@@ -167,5 +167,79 @@ namespace PatternZoneCore
                 ZoneExtremes = new[] { a.Price, c.Price },
             };
         }
+
+        // Last 5 swings e1,v1,e2,v2,e3 (e* same type, v* opposite).
+        public static PatternCandidate TryTriple(IReadOnlyList<PzSwing> swings, PzConfig cfg, double atr)
+        {
+            if (swings.Count < 5)
+                return null;
+
+            int n = swings.Count;
+            PzSwing e1 = swings[n - 5], v1 = swings[n - 4], e2 = swings[n - 3], v2 = swings[n - 2], e3 = swings[n - 1];
+
+            if (e1.IsHigh != e2.IsHigh || e2.IsHigh != e3.IsHigh)
+                return null;
+            if (v1.IsHigh != v2.IsHigh || v1.IsHigh == e1.IsHigh)
+                return null;
+
+            double tol = cfg.TopToleranceAtr * atr;
+            if (Math.Abs(e1.Price - e2.Price) > tol || Math.Abs(e2.Price - e3.Price) > tol || Math.Abs(e1.Price - e3.Price) > tol)
+                return null;
+
+            bool isTop = e1.IsHigh;
+            PzSwing worst = isTop
+                ? (v1.Price <= v2.Price ? v1 : v2)
+                : (v1.Price >= v2.Price ? v1 : v2);
+
+            return new PatternCandidate
+            {
+                Kind = isTop ? PatternKind.TripleTop : PatternKind.TripleBottom,
+                IsShort = isTop,
+                Swings = new[] { e1, v1, e2, v2, e3 },
+                ExtremePrice = isTop
+                    ? Math.Max(e1.Price, Math.Max(e2.Price, e3.Price))
+                    : Math.Min(e1.Price, Math.Min(e2.Price, e3.Price)),
+                ArmedBarIndex = e3.BarIndex,
+                NeckP1 = worst,
+                NeckP2 = worst,
+                ZoneExtremes = new[] { e1.Price, e2.Price, e3.Price },
+            };
+        }
+
+        // Last 5 swings e1,v1,e2,v2,e3; e2 is the head, e1/e3 the shoulders.
+        public static PatternCandidate TryHeadShoulders(IReadOnlyList<PzSwing> swings, PzConfig cfg, double atr)
+        {
+            if (swings.Count < 5)
+                return null;
+
+            int n = swings.Count;
+            PzSwing e1 = swings[n - 5], v1 = swings[n - 4], e2 = swings[n - 3], v2 = swings[n - 2], e3 = swings[n - 1];
+
+            if (e1.IsHigh != e2.IsHigh || e2.IsHigh != e3.IsHigh)
+                return null;
+            if (v1.IsHigh != v2.IsHigh || v1.IsHigh == e1.IsHigh)
+                return null;
+
+            bool isTop = e1.IsHigh;
+            double prominence = cfg.HeadProminenceAtr * atr;
+            double headOverShoulder1 = isTop ? e2.Price - e1.Price : e1.Price - e2.Price;
+            double headOverShoulder2 = isTop ? e2.Price - e3.Price : e3.Price - e2.Price;
+            if (headOverShoulder1 < prominence || headOverShoulder2 < prominence)
+                return null;
+            if (Math.Abs(e1.Price - e3.Price) > cfg.TopToleranceAtr * atr)
+                return null;
+
+            return new PatternCandidate
+            {
+                Kind = isTop ? PatternKind.HeadShoulders : PatternKind.InverseHeadShoulders,
+                IsShort = isTop,
+                Swings = new[] { e1, v1, e2, v2, e3 },
+                ExtremePrice = e2.Price,
+                ArmedBarIndex = e3.BarIndex,
+                NeckP1 = v1,
+                NeckP2 = v2,
+                ZoneExtremes = new[] { e2.Price },
+            };
+        }
     }
 }

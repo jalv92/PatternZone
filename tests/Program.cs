@@ -27,6 +27,7 @@ namespace PatternZone.Tests
             T.Check(true, "smoke");
             CoreTests.Run();
             DoubleTests.Run();
+            TripleHsTests.Run();
             Console.WriteLine(T.Failures == 0 ? "ALL PASS" : T.Failures + " FAILURES");
             return T.Failures == 0 ? 0 : 1;
         }
@@ -101,6 +102,46 @@ namespace PatternZone.Tests
             var c3 = PatternScanner.TryDouble(sw3, cfg, atr);
             T.Check(c3 != null && c3.Kind == PatternKind.DoubleBottom && !c3.IsShort, "double bottom found");
             T.CheckClose(c3.ExtremePrice, 100.0, "DB extreme = lower bottom");
+        }
+    }
+
+    public static class TripleHsTests
+    {
+        static PzSwing S(int bar, double px, bool hi)
+        {
+            return new PzSwing { BarIndex = bar, Time = new DateTime(2026, 8, 12).AddMinutes(bar), Price = px, IsHigh = hi };
+        }
+
+        public static void Run()
+        {
+            Console.WriteLine("TripleHsTests");
+            var cfg = new PzConfig(); double atr = 2.0;   // tol 0.6, prominence 0.6
+
+            // Triple top: 3 tops within 0.6, neckline = LOWER of the two valleys.
+            var tt = new List<PzSwing> { S(0,100,false), S(5,110,true), S(8,106,false), S(12,110.4,true), S(15,104.5,false), S(20,110.2,true) };
+            var c = PatternScanner.TryTriple(tt, cfg, atr);
+            T.Check(c != null && c.Kind == PatternKind.TripleTop && c.IsShort, "triple top found");
+            T.CheckClose(c.NecklineAt(30), 104.5, "TT neckline = worst valley");
+            T.CheckClose(c.ExtremePrice, 110.4, "TT extreme = highest top");
+            T.Check(c.ZoneExtremes.Length == 3, "TT zone extremes = 3 tops");
+
+            // H&S: head above both shoulders by >= 0.6; shoulders within 0.6; sloped neckline.
+            var hs = new List<PzSwing> { S(0,100,false), S(5,108,true), S(8,105,false), S(12,110,true), S(15,106,false), S(20,108.3,true) };
+            var h = PatternScanner.TryHeadShoulders(hs, cfg, atr);
+            T.Check(h != null && h.Kind == PatternKind.HeadShoulders && h.IsShort, "H&S found");
+            T.CheckClose(h.ExtremePrice, 110.0, "HS extreme = head");
+            // Neckline through (8,105) and (15,106): at bar 22 -> 105 + (22-8)*(1/7) = 107
+            T.CheckClose(h.NecklineAt(22), 107.0, "HS sloped neckline extension");
+            T.Check(h.ZoneExtremes.Length == 1 && h.ZoneExtremes[0] == 110.0, "HS zone extreme = head only");
+
+            // Same 5 swings but head prominence too small (109.0 head vs 108/108.3 shoulders, prominence 0.6) -> null.
+            var hs2 = new List<PzSwing> { S(0,100,false), S(5,108,true), S(8,105,false), S(12,108.5,true), S(15,106,false), S(20,108.3,true) };
+            T.Check(PatternScanner.TryHeadShoulders(hs2, cfg, atr) == null, "prominence rejects");
+
+            // Inverse H&S mirrors to long.
+            var ihs = new List<PzSwing> { S(0,112,true), S(5,104,false), S(8,107,true), S(12,102,false), S(15,106,true), S(20,103.8,false) };
+            var hi = PatternScanner.TryHeadShoulders(ihs, cfg, atr);
+            T.Check(hi != null && hi.Kind == PatternKind.InverseHeadShoulders && !hi.IsShort, "inverse H&S found");
         }
     }
 }
