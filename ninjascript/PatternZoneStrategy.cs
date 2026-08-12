@@ -18,7 +18,7 @@
 // ATR: PatternZoneCore.WilderAtr(14), hand-rolled and fed from OnBarUpdate —
 // nt8c cannot resolve the ATR() system wrapper (workspace gotcha) and the core's
 // recursion is the one the 109 unit tests pin. It crosses sessions and never
-// resets, so `canTrade` also gates on CurrentBar >= 14: the engine's internal
+// resets, so `canTrade` also gates on 14 fed bars: the engine's internal
 // `atr <= 0` guard only rejects bar one, while a partially-warmed ATR is
 // positive and shrinks every ATR-scaled gate proportionally.
 //
@@ -49,19 +49,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
     public class PatternZoneStrategy : Strategy
     {
-        // Internal constants, NOT parameters. The ATR period is pinned by the
-        // core's unit tests; the probe length is a diagnostic threshold.
+        // Internal constant, NOT a parameter: the ATR period is pinned by the
+        // core's unit tests.
         private const int AtrPeriod = 14;
         private const int RthOpenSecs = 9 * 3600 + 30 * 60;
         private const int RthCloseSecs = 16 * 3600;
         private const int OnOpenSecs = 18 * 3600;
-        // A full RTH day (390 bars) plus slack: an ETH template cannot run this
-        // long without printing a bar outside 09:30-16:00.
-        private const int RthOnlyProbeBars = 400;
 
         private PzEngine _engine;
         private PzConfig _cfg;
         private WilderAtr _atr;
+        // Bars fed to _atr, NOT CurrentBar: a Playback rewind rebuilds _atr from
+        // scratch while CurrentBar keeps counting, which would leave the warmup
+        // gate open over a one-sample ATR. Reset on the same path that rebuilds
+        // the ATR, so the two can never drift apart.
+        private int _atrBars;
 
         // --- session-level accumulators (ETH series, ET clock assumed) ---
         private DateTime _curRthDate = DateTime.MinValue;
@@ -79,7 +81,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private int _barSecs = 60;
         private bool _rthOnlyWarned;
-        private int _rthOnlyProbe;
 
         protected override void OnStateChange()
         {
@@ -94,7 +95,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOnSessionCloseSeconds = 30;
                 IsInstantiatedOnEachOptimizationIteration = false;
                 // 0, not a warmup count: the ATR warmup is enforced in OnBarUpdate
-                // (CurrentBar >= AtrPeriod) so the recursion still sees every bar.
+                // (_atrBars > AtrPeriod) so the recursion still sees every bar.
                 BarsRequiredToTrade = 0;
 
                 // FROZEN DEFAULTS — spec section 10. The statistical dials were
@@ -219,9 +220,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             _rthHigh = double.NaN; _rthLow = double.NaN; _rthLastClose = double.NaN;
             _onHigh = double.NaN; _onLow = double.NaN;
             _prevRthHigh = double.NaN; _prevRthLow = double.NaN; _prevRthClose = double.NaN;
+            _atrBars = 0;
             _lockout = false;
             _rthOnlyWarned = false;
-            _rthOnlyProbe = 0;
         }
 
         private string Tag(string t)
@@ -245,6 +246,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             var bar = new PzBar { Time = t, Open = Open[0], High = High[0], Low = Low[0], Close = Close[0] };
             _atr.Update(bar);
+            _atrBars++;
 
             // NT8 stamps a bar at its CLOSE, so every session test below is on
             // the bar's START. Taking the start as a DateTime rather than
@@ -256,22 +258,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             int startSecs = (int)barStart.TimeOfDay.TotalSeconds;
             bool inRth = startSecs >= RthOpenSecs && startSecs < RthCloseSecs;
             bool inOn = !inRth && (startSecs >= OnOpenSecs || startSecs < RthOpenSecs);
-
-            // Inverse of PullbackZone's _ethWarned: THIS strategy needs the
-            // overnight bars, because two of the six permission levels are the
-            // overnight high and low. Detection only — the strategy still runs,
-            // it just runs with a smaller level set than the spec describes.
-            if (!_rthOnlyWarned)
-            {
-                if (!inRth)
-                    _rthOnlyWarned = true;                 // a non-RTH bar: ETH template confirmed
-                else if (++_rthOnlyProbe > RthOnlyProbeBars)
-                {
-                    _rthOnlyWarned = true;
-                    Log(Name + ": " + RthOnlyProbeBars + " bars have all opened inside 09:30-16:00 ET — this looks like an RTH session template. PatternZone needs the instrument's FULL ETH template: without overnight bars the overnight high/low levels stay unavailable and the zone permission runs on four levels instead of six.",
-                        Cbi.LogLevel.Warning);
-                }
-            }
 
             // Overnight accumulators: reset when the 18:00 boundary is crossed.
             if (inOn)
@@ -308,6 +294,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                     _prevRthLow = _rthLow;
                     _prevRthClose = _rthLastClose;
 
+                    // Inverse of PullbackZone's _ethWarned, checked at the moment
+                    // it matters: a session opening with no overnight range means
+                    // the overnight bars are not on this chart. Testing for a
+                    // non-RTH bar instead would be silenced by NT8's own "CME US
+                    // Index Futures RTH" template, which runs to 16:15. The
+                    // prior-close term skips the legitimately-empty first loaded
+                    // session; anything else that eats the overnight range trips
+                    // this too, which is the point.
+                    if (!_rthOnlyWarned && !double.IsNaN(_prevRthClose) && double.IsNaN(_onHigh))
+                    {
+                        _rthOnlyWarned = true;
+                        Log(Name + ": a full RTH session opened with no overnight bars — the chart's session template looks RTH-only; OvernightHigh/Low will stay unavailable and the zone engine runs on fewer levels. Use the instrument's full ETH template.",
+                            Cbi.LogLevel.Warning);
+                    }
+
                     _engine.OnSessionOpen(new SessionLevels
                     {
                         PriorDayHigh = _prevRthHigh,
@@ -337,7 +338,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             // half-filled Wilder mean is positive and shrinks every ATR-scaled
             // gate (min height, zone band, stop buffer, pole) proportionally.
             bool inWindow = startSecs >= _entriesWindowStartSecs && startSecs < _cutoffSecs;
-            bool warm = CurrentBar >= AtrPeriod && _atr.IsReady;
+            bool warm = _atrBars > AtrPeriod && _atr.IsReady;
             bool canTrade = !_lockout && inWindow && warm;
             List<PzAction> actions = _engine.OnBarClosed(bar, _atr.Value, canTrade);
 
