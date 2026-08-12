@@ -24,7 +24,7 @@
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license: MIT">
 </p>
 
-<img src="docs/assets/hero.png" width="100%" alt="A double top detected on MNQ 1-minute, drawn over the candles with its neckline, sitting on a long-memory zone band">
+<p><em>Chart captures land here after Phase 1 of <a href="docs/validation.md">docs/validation.md</a> — hero.png (a double top on its zone band), entries.png (a double bottom at the neckline break), zones.png (a session's bands).</em></p>
 
 </div>
 
@@ -108,8 +108,6 @@ Patterns shorter than 1.5 × ATR are rejected as noise — which also guarantees
 the stop is wider than one ATR, since stops below that are noise-stopped by
 construction on this instrument.
 
-<img src="docs/assets/entries.png" width="100%" alt="A double bottom breaking its neckline, with the entry, the aggregate stop and the measured-move target drawn on the chart">
-
 **Adds — continuation patterns, never standalone.** While a position is open, a
 bull or bear flag can add one tranche: a pole of ≥ 2 × ATR within 8 bars of the
 last fill, then 3–10 bars consolidating inside 1 × ATR, then a close out of the
@@ -126,8 +124,6 @@ the next RTH open. Forced flat at 15:55 ET.
 the M or W polyline, a dashed neckline, the flag's pole and rails, faint zone
 bands. Semi-transparent, and no text anywhere: the chart shows *why* it entered
 without becoming a dashboard.
-
-<img src="docs/assets/zones.png" width="100%" alt="An MNQ session with the six long-memory zone bands drawn, including a pattern rejected for forming away from any level">
 
 ## Install
 
