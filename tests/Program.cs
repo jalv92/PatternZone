@@ -604,7 +604,15 @@ namespace PatternZone.Tests
             var near = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 108.7, 108.6 }, ExtremePrice = 108.7 };
             T.Check(z.Permits(near, atr, out lvl), "near-band tops permitted by the proximity allowance");
 
+            T.CheckClose(lvl, 110.1, "proximity permission still reports the PDH");
+            cfg.ZoneProximityAtr = 0.0;
+            T.Check(!z.Permits(near, atr, out lvl), "proximity 0 = strict band, same tops refused");
+            cfg.ZoneProximityAtr = 0.50;                    // restore: cfg is shared below
+
             // --- Amendment 8: the intraday pivot level set --------------------
+            // Kept BELOW the proximity restore on purpose: the assertion above reads
+            // the `lvl` its own Permits call produced, and an insertion between them
+            // silently decouples it.
             // A pattern sitting on NOTHING the session/round levels know about.
             // 130 is 20+ away from every level above, and off the round 100s.
             var cfgP = new PzConfig { UseRound100 = false, UseRound50 = false };
@@ -637,10 +645,6 @@ namespace PatternZone.Tests
             zp.SetPivotZones(new List<PzZone> { new PzZone { Price = 110.0, HalfWidth = 0.6 } });
             T.Check(zp.Permits(dt, atr, out lvl), "DT on PDH still permitted with a pivot nearby");
             T.CheckClose(lvl, 110.1, "named level beats the pivot zone in the report");
-            T.CheckClose(lvl, 110.1, "proximity permission still reports the PDH");
-            cfg.ZoneProximityAtr = 0.0;
-            T.Check(!z.Permits(near, atr, out lvl), "proximity 0 = strict band, same tops refused");
-            cfg.ZoneProximityAtr = 0.50;                    // restore: cfg is shared below
 
             // Round-100: extremes near 30000 permitted with no session level nearby.
             var z2 = new ZoneEngine(cfg);

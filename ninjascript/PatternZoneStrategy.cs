@@ -135,6 +135,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private DateTime _acctSessionDay = DateTime.MinValue;
         private bool _acctWideWarned;              // one non-realtime warning per pass, not per bar
         private bool _noTradeWarned;               // one "why no trades" line per pass
+        private bool _pivEmptyWarned;              // one "pivot series is empty" line per pass
 
         // --- Amendment 8: intraday pivot zones -------------------------------
         // Ported from PullbackZoneStrategy.cs:405-541. The pivot series is the ONLY
@@ -436,6 +437,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _acctSessionDay = DateTime.MinValue;        // lockstep with _dayStartCum below
             _acctWideWarned = false;
             _noTradeWarned = false;
+            _pivEmptyWarned = false;
             // Amendment 6. A Playback rewind moves this instance BACK to a day the shared
             // registry has already passed, and DailyGovernor.For refuses an older day —
             // which would leave account-wide mode silently inert for the rest of the run.
@@ -612,6 +614,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         // existing candidate — the older one keeps its identity and touch count.
         // Half-width is frozen at the pivot-series ATR of the reveal bar, because a
         // zone is a fixed box on the chart and its edges cannot drift.
+        // ponytail: _pivCands is never pruned — a candidate that never reaches
+        // MinTouches lives until the run ends. Bounded in PRICE space rather than by
+        // count: the merge rule below refuses any candidate within a band-width of an
+        // existing one, so the list can only hold as many entries as the day's range
+        // has non-overlapping bands. The O(n) scan per reveal is invisible at a 5m
+        // series; if someone runs a 1-minute pivot series over a long Playback, prune
+        // on the death sweep.
         private void RevealPivot(double px, bool isHigh, double a)
         {
             double hw = PivotZoneWidthAtr * a;
@@ -669,9 +678,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             _atrBars++;
 
             // Amendment 8. Runs from the PRIMARY branch, on every primary bar, and
-            // folds only pivot-series bars that have already closed. The series index
-            // is guarded rather than assumed: with the feature off it does not exist.
-            if (UseIntradayPivots && BarsArray.Length > PivIdx && CurrentBars[PivIdx] >= 0)
+            // folds only pivot-series bars that have already closed.
+            //
+            // No CurrentBars[PivIdx] guard: that reads the same processing pointer the
+            // fold deliberately avoids, and at the first pivot bar of the run it still
+            // says -1 while the series already holds the bar. An empty series has
+            // Count 0 and the fold loop simply does nothing. The BarsArray.Length test
+            // is a different question and IS needed here: the series is conditional, so
+            // with the feature off it does not exist at all.
+            if (UseIntradayPivots && BarsArray.Length > PivIdx)
                 FoldClosedPivotBars();
 
             // NT8 stamps a bar at its CLOSE, so every session test below is on
@@ -766,6 +781,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // baseline it belongs to. A new day means a new record — every
                     // instance's contribution AND the breach broadcast reset together.
                     _acctSessionDay = barStart.Date;
+                    // Amendment 8. Pivot zones ON but no pivot bars at the RTH open =
+                    // the level class is silently absent, which would make an OFF/ON
+                    // comparison meaningless without anyone noticing. Announce it.
+                    if (UseIntradayPivots && !_pivEmptyWarned
+                        && (BarsArray.Length <= PivIdx || BarsArray[PivIdx].Count == 0))
+                    {
+                        _pivEmptyWarned = true;
+                        Announce("intraday pivot zones are ON but the " + PivotSeriesMinutes
+                            + "-minute series has no bars at the session open — no pivot level will exist today. Check that the instrument has intraday history loaded for that series.",
+                            Cbi.LogLevel.Warning);
+                    }
                     _rthHigh = High[0];
                     _rthLow = Low[0];
                 }
