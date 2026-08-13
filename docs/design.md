@@ -309,9 +309,9 @@ templates once PatternZone has found the entry.
     Trader reads). With it **off, nothing changes**: the managed path is
     byte-identical, which is what makes this a strict superset.
     With it on, an entry is submitted via `AtmStrategyCreate` (market) and **the
-    template owns the trade from that moment**. It supplies the stop and target,
-    so `StopOffsetTicks`, `StopBufferAtr` and `TargetMultiple` are ignored, and
-    the **flag add-on is disabled** — the shell hands the engine a config with
+    template owns the trade from that moment**. It supplies the stop, the target and
+    the **position size**, so `StopOffsetTicks`, `StopBufferAtr`, `TargetMultiple`
+    and `Contracts` are all ignored, and the **flag add-on is disabled** — the shell hands the engine a config with
     `EnableFlagAddon = false`, so no add is ever emitted (the core has no idea
     ATM exists). One line at startup lists exactly what the template overrides.
 12. **The engine is driven by polling in ATM mode.** An ATM position is

@@ -139,6 +139,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string _atmId = string.Empty, _atmOrderId = string.Empty;
         private bool _atmPending;                  // created, entry not filled yet
         private bool _atmInPosition;               // entry filled, ATM holding
+        // GetAtmStrategyMarketPosition reads Flat for "not reflected yet", "closed"
+        // and "unknown id" alike, so closure is only believed once the position has
+        // actually been SEEN open (or the ATM reports realized PnL).
+        private bool _atmSeenOpen;
         private double _atmDayRealized;            // ATM PnL this session — SystemPerformance never sees it
         private bool _atmBlocked;                  // config unusable: never trade
         private bool _atmUnusableWarned;
@@ -289,7 +293,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                             + AtmTemplateDir + " — NO trading. Pick a template from the dropdown (it lists the ATM templates saved on this machine).",
                             Cbi.LogLevel.Error);
                     else
-                        Log(Name + ": ATM mode ON, template \"" + tpl + "\". The template now OWNS the trade after entry — it supplies the stop and target, so Stop offset, Stop buffer and Target multiple are ignored, and the flag add-on is DISABLED. PatternZone still decides the entry, the trading window flatten and the daily-loss lockout.",
+                        Log(Name + ": ATM mode ON, template \"" + tpl + "\". The template now OWNS the trade after entry — it supplies the stop, the target AND the position size, so Stop offset, Stop buffer, Target multiple and Contracts are all ignored, and the flag add-on is DISABLED. PatternZone still decides the entry, the trading window flatten and the daily-loss lockout.",
                             Cbi.LogLevel.Information);
                 }
 
@@ -546,7 +550,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _atmUnusableWarned = true;
                 Log(Name + ": ATM mode takes no trades here — " + (_atmBlocked
                         ? "the template is missing or unset."
-                        : "ATM strategies only run in realtime/Playback, never on historical data (Strategy Analyzer)."),
+                        : "ATM strategies never run on historical data. On a live chart this is just the warmup over loaded bars and trading starts when it reaches realtime; in the Strategy Analyzer it means the whole run."),
                     Cbi.LogLevel.Warning);
             }
             bool canTrade = !_lockout && inWindow && inRth && warm && !atmUnusable;
@@ -636,6 +640,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 a.Type == PzActionType.EnterLong ? OrderAction.Buy : OrderAction.SellShort,
                 OrderType.Market, 0, 0, TimeInForce.Day,
                 orderId, AtmTemplateName.Trim(), id,
+                // The callback runs on the UI thread and may land before this call
+                // returns, so it touches only the ATM trio and the engine — and it
+                // may assume the trio is still ITS trade because the guard above
+                // refuses a second ATM while one is live.
                 (errorCode, callbackId) =>
                 {
                     if (callbackId != id)                  // id-gated, like every clear in this file
@@ -649,7 +657,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Print(string.Format(CultureInfo.InvariantCulture,
                 "{0} {1:yyyy-MM-dd HH:mm} ATM ENTRY {2} template={3} atmId={4}",
-                Name, Time[0], a.Pattern.Kind, AtmTemplateName.Trim(), id));
+                Name, Time[0], a.Pattern != null ? a.Pattern.Kind.ToString() : "?", AtmTemplateName.Trim(), id));
         }
 
         // An ATM position is invisible to Position and fires none of our handlers,
@@ -666,16 +674,30 @@ namespace NinjaTrader.NinjaScript.Strategies
                 try { st = GetAtmStrategyEntryOrderStatus(_atmOrderId); } catch { }
                 if (st != null && st.Length > 2)
                 {
-                    if (st[2] == "Filled")
+                    double fill;
+                    double.TryParse(st[0], NumberStyles.Any, CultureInfo.InvariantCulture, out fill);
+                    double filledQty;
+                    double.TryParse(st[1], NumberStyles.Any, CultureInfo.InvariantCulture, out filledQty);
+                    bool terminal = st[2] == "Cancelled" || st[2] == "Rejected";
+
+                    // A terminal entry that filled ANY quantity left a position behind:
+                    // AtmStrategyCreate takes no quantity (the template sets it), so a
+                    // multi-lot template makes partial fills reachable. Treating that as
+                    // a failure would drop a live position out of the flatten and lockout
+                    // paths. Only a zero-fill terminal state is a real failure.
+                    if (st[2] == "Filled" || (terminal && filledQty > 0))
                     {
                         _atmPending = false;
                         _atmInPosition = true;
-                        double fill;
-                        double.TryParse(st[0], NumberStyles.Any, CultureInfo.InvariantCulture, out fill);
-                        Print(Name + ": ATM entry filled at " + fill.ToString("0.##", CultureInfo.InvariantCulture));
+                        Print(Name + ": ATM entry " + (terminal ? st[2] + " after a PARTIAL fill of " + filledQty + " " : "filled ")
+                            + "at " + fill.ToString("0.##", CultureInfo.InvariantCulture));
                         _engine.OnEntryFilled(fill);
+                        // NT8 does not reflect the position until at least the next
+                        // OnBarUpdate, so the closure test below must not run on the
+                        // pass that saw the fill — it would read Flat and forget a live ATM.
+                        return;
                     }
-                    else if (st[2] == "Cancelled" || st[2] == "Rejected")
+                    if (terminal)
                     {
                         Print(Name + ": ATM entry " + st[2] + " unfilled — back to flat.");
                         ClearAtm();
@@ -691,13 +713,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             MarketPosition mp = MarketPosition.Flat;
             try { mp = GetAtmStrategyMarketPosition(_atmId); } catch { }
             if (mp != MarketPosition.Flat)
+            {
+                _atmSeenOpen = true;                   // the position is reflected now
                 return;
+            }
 
-            // The template closed the trade (its target, its stop, or a hand exit).
-            // SystemPerformance never sees ATM trades, so the daily-loss guard is
-            // fed here or not at all.
+            // Flat here is ambiguous: NT8 returns Flat for "not reflected yet",
+            // "closed" and "unknown id" alike. Only trust it once the position was
+            // actually seen open, or once the ATM reports realized PnL — otherwise
+            // wait another bar. Erring this way keeps a live ATM tracked; the other
+            // way loses it.
             double pnl = 0;
             try { pnl = GetAtmStrategyRealizedProfitLoss(_atmId); } catch { }
+            if (!_atmSeenOpen && pnl == 0)
+                return;
             _atmDayRealized += pnl;
             Print(string.Format(CultureInfo.InvariantCulture,
                 "{0} ATM trade closed, realized {1:0.##} USD | session ATM total {2:0.##}",
@@ -713,6 +742,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _atmOrderId = string.Empty;
             _atmPending = false;
             _atmInPosition = false;
+            _atmSeenOpen = false;
         }
 
         // The strategy-level risk rules still bind in ATM mode. AtmStrategyClose
@@ -1465,7 +1495,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         public bool UseAtmStrategy { get; set; }
 
         [NinjaScriptProperty]
-        [TypeConverter(typeof(AtmTemplateNameConverter))]
+        [TypeConverter(typeof(PatternZoneShell.AtmTemplateNameConverter))]
         [Display(Name = "ATM template", Description = "One of the ATM strategy templates saved on this machine (the same list Chart Trader shows). Required when ATM mode is on — an unknown name blocks trading rather than silently falling back.", GroupName = "07. ATM", Order = 1)]
         public string AtmTemplateName { get; set; }
 
@@ -1475,12 +1505,20 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
     }
 
+}
+
+// Own namespace, NOT NinjaTrader.NinjaScript.Strategies: NT8 compiles every file
+// under bin/Custom into one assembly, and a helper type sitting in an NT8
+// namespace is how a CS0101 duplicate-type clash starts (the TrapFlow gap).
+namespace PatternZoneShell
+{
     // Amendment 5: fills the "ATM template" dropdown from the templates saved on
     // THIS machine, the same folder Chart Trader's ATM selector reads.
+    // StringConverter, not TypeConverter: GetStandardValuesExclusive = false lets a
+    // name be typed, and the base has to know how to convert that string.
     // ponytail: enumerating the folder is the whole implementation — NT8 exposes no
-    // public template-name API in the documented surface. Not exclusive, so a name
-    // can still be typed for a template created after the dialog opened.
-    public class AtmTemplateNameConverter : TypeConverter
+    // public template-name API in the documented surface.
+    public class AtmTemplateNameConverter : StringConverter
     {
         public override bool GetStandardValuesSupported(ITypeDescriptorContext context) { return true; }
         public override bool GetStandardValuesExclusive(ITypeDescriptorContext context) { return false; }
@@ -1490,7 +1528,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             var names = new List<string>();
             try
             {
-                string dir = PatternZoneStrategy.AtmTemplateDir;
+                string dir = NinjaTrader.NinjaScript.Strategies.PatternZoneStrategy.AtmTemplateDir;
                 if (Directory.Exists(dir))
                     foreach (string f in Directory.GetFiles(dir, "*.xml"))
                         names.Add(Path.GetFileNameWithoutExtension(f));

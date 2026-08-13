@@ -158,8 +158,9 @@ templates** from the dropdown (it lists the templates saved on this machine, in
 `Documents\NinjaTrader 8\templates\AtmStrategy` — the same list Chart Trader
 shows), and PatternZone hands each entry to that template.
 
-The template then **owns the trade**. It supplies the stop and the target, so the
-stop offset, stop buffer and target multiple do nothing; the flag add-on is
+The template then **owns the trade**. It supplies the stop, the target **and the
+position size**, so the stop offset, stop buffer, target multiple and `Contracts`
+all do nothing; the flag add-on is
 disabled; and PatternZone's own bracket is never submitted. What PatternZone
 still owns is which pattern trades at all, the trading-window flatten, and the
 daily-loss lockout — the last one fed from the ATM's own realized P&L, because
