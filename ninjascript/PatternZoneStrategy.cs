@@ -128,6 +128,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         // `_dayStartCum` — set together at the session open, cleared together in ResetAll
         // — which is what keeps an instance with no baseline out of the shared sum.
         private string _govKey;
+        // Captured WITH the key, not read at teardown: if NT8 detaches the account
+        // before Terminated fires, `Account` is null there and the drop would silently
+        // no-op — leaving exactly the ghost contributor the drop exists to prevent.
+        private string _govAccount;
         private DateTime _acctSessionDay = DateTime.MinValue;
         private bool _acctWideWarned;              // one non-realtime warning per pass, not per bar
 
@@ -157,6 +161,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double _atmDayRealized;            // ATM PnL this session — SystemPerformance never sees it
         private bool _atmBlocked;                  // config unusable: never trade
         private bool _atmUnusableWarned;
+        private bool _atmNanWarned;                // ATM realized PnL came back NaN — said once
 
         // Seconds per bar on a TIME chart, 0 on every other bar type — the flag that
         // picks the bar-start rule in OnBarUpdate, so it is never clamped to a default.
@@ -325,6 +330,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // so two instances on the SAME instrument and account are two
                 // contributors rather than one silently overwriting the other.
                 _govKey = Instrument.FullName + "/" + Guid.NewGuid().ToString("N").Substring(0, 4);
+                _govAccount = Account != null ? Account.Name : null;
                 if (AccountWide)
                     Log(Name + ": account-wide daily limits are ON — the limits are measured against the SUM of every PATTERNZONE instance on this account, and a breach on any one of them flattens and locks out all of them. It does NOT include other strategies (LatigoBreak, TBStrategy) or manual trades: the sum is built from these instances' own numbers, never from the account's aggregates.",
                         Cbi.LogLevel.Information);
@@ -340,8 +346,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // would double-count a phantom that no longer trades. Terminated is the
                 // teardown NT8 guarantees for all of those. The record and its Breached
                 // flag survive: only this contributor leaves.
-                if (Account != null && !string.IsNullOrEmpty(_govKey))
-                    PatternZoneShell.DailyGovernor.Drop(Account.Name, _govKey);
+                if (!string.IsNullOrEmpty(_govAccount) && !string.IsNullOrEmpty(_govKey))
+                    PatternZoneShell.DailyGovernor.Drop(_govAccount, _govKey);
             }
         }
 
@@ -398,6 +404,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             ClearAtm();
             _atmDayRealized = 0;
             _atmUnusableWarned = false;
+            _atmNanWarned = false;
 
             _pendingAction = null; _pendingAdd = null;
             _entrySig = null; _addSig = null;
@@ -798,6 +805,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Print(Name + ": waiting for the ATM position to reflect (id " + _atmId + ").");
                 }
                 return;
+            }
+            // The getter is only wrapped for THROWS. A NaN return would poison the
+            // session total permanently, and since every comparison against NaN is
+            // false, the daily-loss limit would then fail OPEN — silently, on the
+            // default path, with no account-wide mode needed to reach it.
+            if (double.IsNaN(pnl))
+            {
+                if (!_atmNanWarned)                    // once per pass: a broken getter must be visible, not spam
+                {
+                    _atmNanWarned = true;
+                    Print(Name + ": GetAtmStrategyRealizedProfitLoss returned NaN — that trade's PnL is NOT in the session total, so the daily limits under-count it. Check the ATM in the Orders tab.");
+                }
+                pnl = 0;
             }
             _atmDayRealized += pnl;
             Print(string.Format(CultureInfo.InvariantCulture,
