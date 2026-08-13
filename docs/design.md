@@ -432,3 +432,33 @@ well as on before believing any lift).
 23. **Drawing.** Born-to-now rectangles in the PullbackZone style, OrangeRed for
     pivot highs and DodgerBlue for lows (distinct from the SlateGray session
     bands), greyed once when they die, under the same `DrawZones` toggle.
+
+**Amendment 9 — 2026-08-13 (pre-P&L). One trade per instrument, account-level.**
+Javier runs two robots on the same instrument with sequential windows. Robot 1's
+trade can still be open when robot 2's window starts, and nothing stopped robot 2
+from stacking a second position on the same underlying.
+
+24. **`BlockIfInstrumentBusy` (default ON).** An entry is skipped while the
+    ACCOUNT holds any position on this underlying. Entries only — the flag add is
+    never gated, because an add belongs to our own open trade and by definition
+    the instrument is busy with US.
+25. **It reads the ACCOUNT, because `Position` cannot see this.** The strategy's
+    `Position` is virtual: it knows only the fills this strategy made, so another
+    robot's position and a manual one are both invisible to it. The check
+    enumerates `Account.Positions` under `lock (Account.Positions)` — NT8's
+    documented idiom for that collection, which the platform owns and mutates on
+    its own threads (developer.ninjatrader.com/docs/desktop/positions).
+    `PositionAccount` would be a one-line alternative but is scoped to THIS
+    contract; the match is deliberately on **MasterInstrument**, so another expiry
+    of the same underlying blocks too — same risk, protective direction.
+26. **Both guards sit AFTER the existing flat/pending refusals**, in `SubmitEntry`
+    and `SubmitAtmEntry`. That ordering is what makes the rule sound: we are
+    already known flat, so anything the account holds belongs to someone else. On
+    the ATM path it matters more, not less — an ATM position is invisible to
+    `Position`, so the account collection is the only place a sibling robot's ATM
+    trade appears at all.
+27. **A skip costs a session-trade slot.** The engine counts a trade when it
+    EMITS the entry action, and the refusal path is the existing
+    `OnEntryFailed()`, which does not refund it — the same convention every other
+    refusal in the order layer already follows. Conservative and consistent;
+    changing it would be its own amendment.

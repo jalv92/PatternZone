@@ -145,6 +145,16 @@ position does nothing at all.
 the next RTH open, and a daily profit target does the same on the winning side
 (off by default). Forced flat at 15:55 ET.
 
+**One trade per instrument, across robots.** With **One trade per instrument
+(account)** ticked (the default), PatternZone will not open a position while the
+account already holds one on that underlying — another strategy's or one you
+opened by hand. It is the two-robots case: sequential windows on the same
+instrument, robot 1 still in its trade when robot 2's window opens, robot 2
+stands aside until the instrument is flat. It matches on the underlying, so a
+different contract month counts as busy too. A skipped entry still consumes one
+of the session's trade slots, exactly like every other refusal in the order
+layer.
+
 **Shared daily limits across markets.** Tick **Account-wide (all markets)** and
 the two daily limits stop measuring this chart and start measuring the **sum of
 every PatternZone instance running on the account** — MNQ and NQ and anything
@@ -251,6 +261,7 @@ written up in [`docs/design.md`](docs/design.md#amendments).
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |
 | Risk | Contracts · max trades/session · window · daily loss limit | 1 · 3 · 09:30–15:55 ET · $200 |
 | Daily limits | Daily profit target · account-wide (all markets) | off (0) · off |
+| Instrument | One trade per instrument (account) *(Amendment 9)* | on |
 | ATM | Use ATM strategy · ATM template | off · (none) |
 
 **Cosmetic dials — free.** Zone drawing, the three brushes, pattern and zone

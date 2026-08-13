@@ -267,6 +267,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DailyProfitTargetUsd = 0;
                 DailyLossLimitUsd = 200;
                 AccountWide = false;
+                BlockIfInstrumentBusy = true;       // Amendment 9: protection, on by default
 
                 DrawZones = true;
                 LongBrush = Brushes.MediumSeaGreen;
@@ -972,6 +973,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _engine.OnEntryFailed();
                 return;
             }
+            // Amendment 9, same rule on the ATM path — and it matters MORE here: an ATM
+            // position is invisible to `Position`, so the account collection is the only
+            // place a sibling robot's ATM trade shows up at all.
+            string atmBusy;
+            if (InstrumentBusy(out atmBusy))
+            {
+                Print(Name + ": entry skipped — instrument busy: " + atmBusy + " open on the account.");
+                _engine.OnEntryFailed();
+                return;
+            }
 
             string id = GetAtmStrategyUniqueId();
             string orderId = GetAtmStrategyUniqueId();
@@ -1121,6 +1132,36 @@ namespace NinjaTrader.NinjaScript.Strategies
             try { AtmStrategyClose(_atmId); } catch { }
         }
 
+        // Amendment 9. TRUE when the ACCOUNT holds a position on this underlying. The
+        // strategy's own `Position` is virtual — blind to other strategies and to manual
+        // trades — so the account collection is the only honest source. Called only from
+        // the two entry guards, AFTER each has established that WE are flat, so anything
+        // found here belongs to someone else.
+        //
+        // `lock` on the collection is NT8's documented idiom for enumerating it, not
+        // defensive garnish: the platform owns it and mutates it on its own threads
+        // (developer.ninjatrader.com/docs/desktop/positions).
+        //
+        // MasterInstrument, not the contract: a position in another expiry of the same
+        // underlying is the same risk, so it blocks too. ponytail: PositionAccount would
+        // be a one-liner for the same thing, but it is scoped to THIS contract only.
+        private bool InstrumentBusy(out string detail)
+        {
+            detail = null;
+            if (!BlockIfInstrumentBusy || Account == null)
+                return false;
+            string mine = Instrument.MasterInstrument.Name;
+            lock (Account.Positions)
+                foreach (Cbi.Position p in Account.Positions)
+                    if (p.MarketPosition != MarketPosition.Flat
+                        && p.Instrument.MasterInstrument.Name == mine)
+                    {
+                        detail = p.Quantity + " " + p.Instrument.FullName + " " + p.MarketPosition;
+                        return true;
+                    }
+            return false;
+        }
+
         private void SubmitEntry(PzAction a)
         {
             if (UseAtmStrategy)
@@ -1134,6 +1175,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (a.Pattern == null || Position.MarketPosition != MarketPosition.Flat || _entryPending)
             {
                 Print(Name + ": entry refused — no pattern, not flat, or one is already working.");
+                _engine.OnEntryFailed();
+                return;
+            }
+            // Amendment 9. WE are flat by the guard above, so anything the account holds
+            // on this underlying is someone else's — another strategy or a manual trade.
+            string busy;
+            if (InstrumentBusy(out busy))
+            {
+                Print(Name + ": entry skipped — instrument busy: " + busy + " open on the account.");
                 _engine.OnEntryFailed();
                 return;
             }
@@ -1937,6 +1987,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0, 100000)]
         [Display(Name = "Daily loss limit (USD)", Description = "Realized session loss at or beyond this flattens and locks out until the next session. 0 = off.", GroupName = "05. Risk", Order = 5)]
         public double DailyLossLimitUsd { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "One trade per instrument (account)", Description = "Skip an entry while ANY position is open on this underlying at the ACCOUNT level — another strategy's (two robots with sequential windows on the same instrument) or one you opened by hand. Matches on the underlying, so a different contract month blocks too. The strategy's own position is not affected: this only refuses NEW entries while someone else is in.", GroupName = "05. Risk", Order = 7)]
+        public bool BlockIfInstrumentBusy { get; set; }
 
         [NinjaScriptProperty]
         [Display(Name = "Account-wide (all markets)", Description = "Measure the two limits above against the SUM of the day P&L of every PATTERNZONE instance on this account, so one breach flattens and locks out all of them together. Other strategies and manual trades are NOT included. The shared total also counts OPEN P&L, unlike the per-strategy limits. OFF = this instance's own realized P&L only.", GroupName = "05. Risk", Order = 6)]
