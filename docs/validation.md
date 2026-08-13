@@ -15,6 +15,11 @@ Rules that govern the whole document:
   never a tweak.
 - **Out-of-sample only.** A session used to debug the detector is spent; it
   cannot be counted again as evidence.
+- **One bar type, one strategy.** Since Amendment 4 the strategy runs on any bar
+  type, but a 150-tick variant is a *different strategy* for evidence purposes —
+  different dials, different ATR scale, different trade population. Phases 1–4
+  apply per variant and results never transfer between them. The pre-registered
+  baseline is **1 Minute**.
 - **A negative result gets published.** If the strategy fails, the README says
   so in plain language and the repo stays up. House tradition — the negative
   results are the reason the workspace still has money.

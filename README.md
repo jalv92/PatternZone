@@ -151,6 +151,26 @@ with a roof; with them the shape reads the way a human draws it. No neckline (it
 was drawn in the first build and taken out after looking at it), and no text
 anywhere: the chart shows *why* it entered without becoming a dashboard.
 
+## Bar types
+
+The strategy is **bar-type agnostic** — 1-minute, 30-second, 150-tick, volume or
+range charts all work. Detection never referred to clock time, and since
+Amendment 4 the session bookkeeping derives each bar's start from the previous
+bar's close, which is exact for any bar type.
+
+What does not transfer is the dials. Bar-count dials (trend lookback, max pattern
+span, the pole and flag budgets) count **this chart's** bars, and the ATR-scaled
+dials breathe with whatever range this chart's bars have. 60 bars of 150-tick MNQ
+is not 60 minutes.
+
+So keep one **NT8 Strategy Template per bar type** — Save As `PZ-1m`,
+`PZ-150tick`, `PZ-30s` — and let each carry its own dials. For a 150-tick MNQ
+chart, `TrendLookbackBars` and `MaxPatternBars` probably want to go **up**, since
+each bar covers less time than a 1-minute bar in active trade. That is a
+suggestion and **entirely unvalidated**: the validated baseline is 1 Minute, and
+[`docs/validation.md`](docs/validation.md) treats each bar-type variant as its own
+strategy that has to earn its own evidence.
+
 ## Install
 
 1. Copy **both** files to `Documents\NinjaTrader 8\bin\Custom\Strategies\`:

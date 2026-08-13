@@ -267,3 +267,25 @@ lead into and out of it.
    The lead-in is omitted, never invented, when the swing list did not hold that
    preceding swing. Both use the same brush, width and opacity rules as the rest
    of the polyline, so rejected patterns get them at half opacity too.
+
+**Amendment 4 — 2026-08-12 (pre-P&L). Shell only — the core is untouched.**
+Javier wants to run 150-tick charts without losing seconds/minutes. The
+detection engine was already bar-agnostic; the shell's session bookkeeping was
+not, because it derived a bar's start as `close − barSeconds`, which is
+meaningless for a tick/volume/range bar.
+
+9. **Any-bar-type session bookkeeping.** A bar's start is now the PREVIOUS
+   bar's close — exact for contiguous bars of every type. Across a session gap,
+   a halt, or on the first bar the previous close lies far back, so a 30-minute
+   cap falls back to the close-side approximation: the bar's own duration on a
+   time chart, **1 second** otherwise, which classifies a post-gap tick bar by
+   the side its ticks actually printed on. Everything downstream (`inRth` /
+   `inOn`, the overnight accumulators, the first-RTH-bar snapshot and `DayOpen`,
+   the window gates) reads `barStart` unchanged.
+10. **The bar-type warning was reworded.** It no longer says the chart "does not
+    run the strategy that was designed" — every bar type is supported now. It
+    names the detected bar type and warns that all bar-count dials count THIS
+    chart's bars while the ATR scales to them, so the dials mean something
+    different per chart. The validated baseline stays 1 Minute, and **each
+    bar-type variant is its own strategy for evidence purposes** — see
+    `docs/validation.md`.
