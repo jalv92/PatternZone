@@ -331,6 +331,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 ResetAll(false);
             }
+            else if (State == State.Terminated)
+            {
+                // Amendment 6, C1. `_govKey` gets a FRESH guid at every DataLoaded, so
+                // without this every disable/re-enable, parameter change or reconnect
+                // would strand the dead key's last published P&L in the shared record
+                // while the reloaded instance publishes under the new one — the group
+                // would double-count a phantom that no longer trades. Terminated is the
+                // teardown NT8 guarantees for all of those. The record and its Breached
+                // flag survive: only this contributor leaves.
+                if (Account != null && !string.IsNullOrEmpty(_govKey))
+                    PatternZoneShell.DailyGovernor.Drop(Account.Name, _govKey);
+            }
         }
 
         // removeDrawings: true only on a Playback rewind — the discarded pass's
@@ -367,7 +379,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Dropping the record lets the group re-form on the rewound day. ONLY on a
             // rewind: doing this at DataLoaded too would mean a strategy restart wipes a
             // live breach broadcast, i.e. a daily limit you can clear with a checkbox.
-            if (removeDrawings && Account != null)
+            // AccountWide is in the test on purpose: an opted-OUT instance rewinding must
+            // not wipe the record the opted-in ones are sharing.
+            if (removeDrawings && AccountWide && Account != null)
                 PatternZoneShell.DailyGovernor.Forget(Account.Name);
 
             // Order state. A rewind discards the pass that owned these; anything
@@ -1059,6 +1073,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 // Published BEFORE the limits-off return below, deliberately: an instance
                 // with its own limits at 0 still has to count toward everyone else's sum.
+                // Rollover seam: `For` above and `Publish` below are two separate locks,
+                // so a publish can land in a record that another instance just replaced
+                // at a day roll — that contribution is lost for one bar and republished
+                // on the next, because nobody caches the record. Do NOT "optimize" the
+                // per-tick re-fetch away; the re-fetch IS the self-healing.
                 double own = OwnDayPnl(true);
                 // A NaN contribution would make the group's SUM NaN, every comparison
                 // against it false, and the governor would die silently for EVERY
@@ -1709,6 +1728,15 @@ namespace PatternZoneShell
                 }
             }
 
+            // Remove ONE contributor, on its way out. The record and its Breached flag
+            // stay: a breach has to outlive the instance that left, or disabling the
+            // breached chart would clear the group's lockout.
+            public void Remove(string key)
+            {
+                lock (_pnl)
+                    _pnl.Remove(key);
+            }
+
             // "MNQ 09-26/4f2a -412.50; ES 09-26/9c01 120.00; " — which instrument put
             // the group where it is. Only ever built on the bar a limit actually trips.
             public string Breakdown()
@@ -1755,6 +1783,21 @@ namespace PatternZoneShell
         {
             lock (Accounts)
                 Accounts.Remove(account);
+        }
+
+        // Retire one instance's contribution when that instance goes away. Without it
+        // every disable/re-enable, parameter change or reconnect would leave the dead
+        // `_govKey`'s last published P&L frozen in the record while the reloaded
+        // instance publishes under a FRESH key — the group would double-count a phantom
+        // and lock everyone out (or trip the profit target) on P&L that no longer exists.
+        public static void Drop(string account, string key)
+        {
+            lock (Accounts)
+            {
+                AccountDay g;
+                if (Accounts.TryGetValue(account, out g))
+                    g.Remove(key);
+            }
         }
     }
 
