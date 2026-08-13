@@ -143,6 +143,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         // and "unknown id" alike, so closure is only believed once the position has
         // actually been SEEN open (or the ATM reports realized PnL).
         private bool _atmSeenOpen;
+        private bool _atmWaitPrinted;              // one "waiting to reflect" line per ATM, not per bar
         private double _atmDayRealized;            // ATM PnL this session — SystemPerformance never sees it
         private bool _atmBlocked;                  // config unusable: never trade
         private bool _atmUnusableWarned;
@@ -726,7 +727,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             double pnl = 0;
             try { pnl = GetAtmStrategyRealizedProfitLoss(_atmId); } catch { }
             if (!_atmSeenOpen && pnl == 0)
+            {
+                if (!_atmWaitPrinted)                  // first waiting bar only — a stall must be visible, not spam
+                {
+                    _atmWaitPrinted = true;
+                    Print(Name + ": waiting for the ATM position to reflect (id " + _atmId + ").");
+                }
                 return;
+            }
             _atmDayRealized += pnl;
             Print(string.Format(CultureInfo.InvariantCulture,
                 "{0} ATM trade closed, realized {1:0.##} USD | session ATM total {2:0.##}",
@@ -743,6 +751,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _atmPending = false;
             _atmInPosition = false;
             _atmSeenOpen = false;
+            _atmWaitPrinted = false;
         }
 
         // The strategy-level risk rules still bind in ATM mode. AtmStrategyClose
