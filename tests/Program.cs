@@ -603,6 +603,40 @@ namespace PatternZone.Tests
             // (half-width 1.0) but inside the permission band (2.0).
             var near = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 108.7, 108.6 }, ExtremePrice = 108.7 };
             T.Check(z.Permits(near, atr, out lvl), "near-band tops permitted by the proximity allowance");
+
+            // --- Amendment 8: the intraday pivot level set --------------------
+            // A pattern sitting on NOTHING the session/round levels know about.
+            // 130 is 20+ away from every level above, and off the round 100s.
+            var cfgP = new PzConfig { UseRound100 = false, UseRound50 = false };
+            var zp = new ZoneEngine(cfgP);
+            zp.SetLevels(new SessionLevels { PriorDayHigh = 110.1 });
+            var onPivot = new PatternCandidate
+            {
+                Kind = PatternKind.DoubleTop, IsShort = true,
+                ZoneExtremes = new[] { 130.0, 130.2 }, ExtremePrice = 130.2
+            };
+            T.Check(!zp.Permits(onPivot, atr, out lvl), "pivot-only pattern rejected with no pivot set");
+
+            // Same pattern, same engine, one pivot zone supplied: now permitted,
+            // and the reported level is the pivot's price.
+            var pivots = new List<PzZone> { new PzZone { Price = 130.1, HalfWidth = 0.6 } };
+            zp.SetPivotZones(pivots);
+            T.Check(zp.Permits(onPivot, atr, out lvl), "pivot-only pattern permitted once the zone exists");
+            T.CheckClose(lvl, 130.1, "reported level = the pivot zone");
+
+            // The pivot band is its OWN half-width plus the same proximity
+            // allowance every other level gets (0.6 + 0.5*2.0 = 1.6 here).
+            var farFromPivot = new PatternCandidate { Kind = PatternKind.DoubleTop, IsShort = true, ZoneExtremes = new[] { 132.0, 131.9 }, ExtremePrice = 132.0 };
+            T.Check(!zp.Permits(farFromPivot, atr, out lvl), "tops beyond the pivot band + proximity rejected");
+
+            // Emptying the set puts the engine back to pre-amendment behavior.
+            pivots.Clear();
+            T.Check(!zp.Permits(onPivot, atr, out lvl), "cleared pivot set stops permitting");
+
+            // A named level still wins the REPORTED reason when both would match.
+            zp.SetPivotZones(new List<PzZone> { new PzZone { Price = 110.0, HalfWidth = 0.6 } });
+            T.Check(zp.Permits(dt, atr, out lvl), "DT on PDH still permitted with a pivot nearby");
+            T.CheckClose(lvl, 110.1, "named level beats the pivot zone in the report");
             T.CheckClose(lvl, 110.1, "proximity permission still reports the PDH");
             cfg.ZoneProximityAtr = 0.0;
             T.Check(!z.Permits(near, atr, out lvl), "proximity 0 = strict band, same tops refused");

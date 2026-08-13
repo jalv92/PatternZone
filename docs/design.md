@@ -388,3 +388,47 @@ trading decision, so `PatternZoneCore.cs` and its 141 assertions are unchanged.
     And the registry wipe on reset is gated to a **Playback rewind** only: doing it
     at `DataLoaded` too would mean disabling and re-enabling a strategy clears a
     live breach broadcast, i.e. a daily limit you can escape with a checkbox.
+
+**Amendment 8 — 2026-08-12 (pre-P&L). Intraday pivot zones.**
+Javier approved a NEW level class: S/R built from repeatedly-touched intraday
+pivots, on top of the six session/round levels. The zone engine is ported from
+`PullbackZoneStrategy.cs:405-541` rather than reinvented.
+
+**Stated honestly up front: this level class is unvalidated, and its family has a
+poor record here.** The two studies that tested levels-plus-retest on 15m data
+were both killed — `[[break-retest-study]]` (detection fine, naive entry dead on
+a triple kill) and `[[trendline-retest-study]]` (does not separate from placebo,
+negative expectancy). What is different this time is the *use*: a pivot zone is
+only a **permission** input to a pattern that must independently qualify, never
+an entry trigger on its own. That is a weaker claim than either dead study made,
+which is the only reason it is worth running — and it is exactly why Phase 3/4
+must be able to attribute results to it (run the frozen backtest with it off as
+well as on before believing any lift).
+
+20. **A pivot zone carries its own band.** `UseIntradayPivots` (default **on** —
+    the user asked for it working), `PivotSeriesMinutes` (5), `PivotMinTouches`
+    (3 — PullbackZone ships 2), plus the ported dials `PivotK` (3),
+    `PivotZoneWidthAtr` (0.30), `PivotBreakAtr` (0.25), `PivotExpiryDays` (2).
+    A pivot is revealed k bars back by a strict-unique extreme, accumulates
+    touches (bar enters the band, closes back outside), and is promoted to a zone
+    at `PivotMinTouches`. Its half-width is **frozen at the pivot series' ATR on
+    the reveal bar** — a zone is a fixed box and its edges cannot drift. Zones die
+    on a clean break or on calendar-day expiry.
+21. **The core stays pure.** The shell computes the zones and hands the engine a
+    `List<PzZone>` (price + half-width) ONCE, mutating it in place; `PzZone` is a
+    two-field struct with no NT8 types, so the whole seam is unit-testable and the
+    suite pins it (7 new assertions, 148 total). Session and round levels are
+    tried FIRST — a pivot zone never steals the reported reason from a level that
+    already qualified. Proximity (`ZoneProximityAtr`) is applied to a pivot band
+    the same way it is to a named one: added on top of that band's own
+    half-width, because proximity means "how far outside a band still counts".
+22. **Its own series, added only when enabled.** `AddDataSeries(Minute,
+    PivotSeriesMinutes)` at `State.Configure`, so with the feature off the
+    strategy stays single-series and every path is untouched. Folding runs from
+    the PRIMARY branch and reads the pivot series by **absolute index** through
+    `BarsArray` — a secondary series' own processing pointer is one bar late — and
+    only for bars whose time is at or before the current primary bar's close. That
+    `> Time[0]` guard is the only thing between the fold loop and lookahead.
+23. **Drawing.** Born-to-now rectangles in the PullbackZone style, OrangeRed for
+    pivot highs and DodgerBlue for lows (distinct from the SlateGray session
+    bands), greyed once when they die, under the same `DrawZones` toggle.

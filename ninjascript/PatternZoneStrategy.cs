@@ -136,6 +136,22 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool _acctWideWarned;              // one non-realtime warning per pass, not per bar
         private bool _noTradeWarned;               // one "why no trades" line per pass
 
+        // --- Amendment 8: intraday pivot zones -------------------------------
+        // Ported from PullbackZoneStrategy.cs:405-541. The pivot series is the ONLY
+        // secondary series, so its BarsInProgress index is 1; it exists only when
+        // UseIntradayPivots is on, which is what keeps the single-series paths below
+        // byte-identical with the feature off.
+        private const int PivIdx = 1;
+        private const int PivotAtrN = 14;          // house seed (PullbackZone's _ZONE_ATR_N15)
+        private readonly List<PatternZoneShell.PivotZone> _pivZones = new List<PatternZoneShell.PivotZone>();
+        private readonly List<PatternZoneShell.PivotCand> _pivCands = new List<PatternZoneShell.PivotCand>();
+        // What the engine reads: rebuilt from the live zones after each fold, so the
+        // core never sees a dead zone and never sees an NT8 type.
+        private readonly List<PzZone> _pivLive = new List<PzZone>();
+        private int _pivBarDone = -1;              // last folded absolute index on the pivot series
+        private double _atrPiv, _prevPivClose;     // own Wilder recursion on the pivot series
+        private int _nPiv, _pivSeq;
+
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
         private readonly HashSet<string> _drawTags = new HashSet<string>();
@@ -215,6 +231,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 UseRound100 = true;
                 UseRound50 = false;
 
+                // Amendment 8. ON by default — the user asked for it working. Dials
+                // are PullbackZone's calibrated ones except MinTouches, which he
+                // raised to 3 (PullbackZone ships 2).
+                UseIntradayPivots = true;
+                PivotSeriesMinutes = 5;
+                PivotMinTouches = 3;
+                PivotK = 3;
+                PivotZoneWidthAtr = 0.30;
+                PivotBreakAtr = 0.25;
+                PivotExpiryDays = 2;
+
                 StopOffsetTicks = 10;
                 StopBufferAtr = 0.50;
                 TargetMultiple = 1.0;
@@ -251,6 +278,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ZoneOpacityPct = 10;
                 PatternLineWidth = 4;
                 DrawRejectedPatterns = false;
+            }
+            else if (State == State.Configure)
+            {
+                // Amendment 8. Added ONLY when the feature is on, so with it off the
+                // strategy stays single-series and every path below is untouched —
+                // BarsInProgress can only ever be 0 and BarsArray has one entry.
+                if (UseIntradayPivots)
+                    AddDataSeries(BarsPeriodType.Minute, PivotSeriesMinutes);
             }
             else if (State == State.DataLoaded)
             {
@@ -381,6 +416,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             // exposes no Reset(), so a fresh instance IS the reset.
             _engine = new PzEngine(_cfg);
             _atr = new WilderAtr(AtrPeriod);
+            // Amendment 8: handed over ONCE — the shell mutates the same list in place,
+            // so there is no per-bar plumbing and no copy on the hot path.
+            _engine.SetPivotZones(_pivLive);
+            _pivZones.Clear();
+            _pivCands.Clear();
+            _pivLive.Clear();
+            _pivBarDone = -1;
+            _atrPiv = 0; _prevPivClose = 0; _nPiv = 0;
 
             _curRthDate = DateTime.MinValue;
             _curOnDate = DateTime.MinValue;
@@ -440,6 +483,163 @@ namespace NinjaTrader.NinjaScript.Strategies
             return t;
         }
 
+        // --- Amendment 8: the pivot-zone engine ------------------------------
+        // Ported from PullbackZoneStrategy.cs:405-541, structure and comments kept so
+        // the two stay diffable. Everything here runs from the PRIMARY branch and
+        // reads the pivot series by ABSOLUTE INDEX: a secondary series' own
+        // processing pointer is one bar late, so BarsArray[..].GetX(j) is the only
+        // read that is safe here (PullbackZone's delta-9 trap).
+        //
+        // Bars.Count spans the WHOLE loaded series, future bars included, so the
+        // `> Time[0]` guard is the ONLY thing standing between this loop and
+        // lookahead. IT MUST NEVER BE WEAKENED.
+        private void FoldClosedPivotBars()
+        {
+            Bars bp = BarsArray[PivIdx];
+            bool folded = false;
+            for (int j = _pivBarDone + 1; j < bp.Count; j++)
+            {
+                if (bp.GetTime(j) > Time[0])
+                    break;                             // not closed yet
+                FoldPivotBar(bp, j);
+                _pivBarDone = j;
+                folded = true;
+            }
+            if (!folded)
+                return;
+            DrawPivotZones();                          // greys the dead ones one last time
+            _pivZones.RemoveAll(z => z.Dead);          // the per-bar path only walks live zones
+            // Rebuild what the core reads: live zones only, no NT8 types, no dead boxes.
+            _pivLive.Clear();
+            foreach (PatternZoneShell.PivotZone z in _pivZones)
+                _pivLive.Add(new PzZone { Price = z.Px, HalfWidth = z.HalfW });
+        }
+
+        private void FoldPivotBar(Bars bp, int j)
+        {
+            double h = bp.GetHigh(j), l = bp.GetLow(j), c = bp.GetClose(j);
+            DateTime t = bp.GetTime(j);
+
+            // Wilder ATR on the pivot series. TrueRange reaches ACROSS the session
+            // break, exactly like NinjaTrader's own recursion — the house convention.
+            double tr = _nPiv == 0
+                ? h - l
+                : Math.Max(h - l, Math.Max(Math.Abs(h - _prevPivClose), Math.Abs(l - _prevPivClose)));
+            _atrPiv = _nPiv < PivotAtrN
+                ? (_atrPiv * _nPiv + tr) / (_nPiv + 1)
+                : _atrPiv + (tr - _atrPiv) / PivotAtrN;
+            _prevPivClose = c;
+            _nPiv++;
+
+            double a = _atrPiv;
+            if (!(a > 0))
+                return;
+
+            // Reveals at this bar: the pivot sits k bars back and is confirmed by
+            // this close. Strict-unique max/min over the 2k+1 window; highs are
+            // offered before lows.
+            int k = PivotK;
+            if (j - 2 * k >= 0)
+            {
+                double ph = bp.GetHigh(j - k), pl = bp.GetLow(j - k);
+                bool hiMax = true, loMin = true;
+                int hiEq = 0, loEq = 0;
+                for (int w = j - 2 * k; w <= j; w++)
+                {
+                    double wh = bp.GetHigh(w), wl = bp.GetLow(w);
+                    if (wh > ph) hiMax = false;
+                    else if (wh == ph) hiEq++;
+                    if (wl < pl) loMin = false;
+                    else if (wl == pl) loEq++;
+                }
+                if (hiMax && hiEq == 1) RevealPivot(ph, true, a);
+                if (loMin && loEq == 1) RevealPivot(pl, false, a);
+            }
+
+            // Touches. A candidate revealed on THIS bar can be touched by it. A touch
+            // is: the bar enters the band and CLOSES back on the original side.
+            // Promotion removes the candidate and appends the zone.
+            for (int i = 0; i < _pivCands.Count; )
+            {
+                PatternZoneShell.PivotCand cd = _pivCands[i];
+                double loEdge = cd.Px - cd.HalfW, hiEdge = cd.Px + cd.HalfW;
+                bool touched = cd.PivotHigh
+                    ? (h >= loEdge && c < loEdge)
+                    : (l <= hiEdge && c > hiEdge);
+                if (!touched)
+                {
+                    i++;
+                    continue;
+                }
+                cd.Touches++;
+                if (cd.Touches >= PivotMinTouches)
+                {
+                    _pivZones.Add(new PatternZoneShell.PivotZone
+                    {
+                        Id = _pivSeq++,
+                        Px = cd.Px,
+                        HalfW = cd.HalfW,
+                        Touches = cd.Touches,
+                        PivotHigh = cd.PivotHigh,
+                        BornTime = t,
+                        BornDay = t.Date,
+                    });
+                    _pivCands.RemoveAt(i);
+                }
+                else i++;
+            }
+
+            // Deaths. The zone born on this very bar is in the list and IS tested.
+            foreach (PatternZoneShell.PivotZone z in _pivZones)
+            {
+                if (z.Dead)
+                    continue;
+                double loEdge = z.Px - z.HalfW, hiEdge = z.Px + z.HalfW;
+                bool broke = z.PivotHigh
+                    ? (c > hiEdge + PivotBreakAtr * a)
+                    : (c < loEdge - PivotBreakAtr * a);
+                // Expiry counts CALENDAR days, not trading sessions — a Friday zone is
+                // dead on Monday. Deliberate, and inherited from PullbackZone.
+                if (broke || (t.Date - z.BornDay).Days >= PivotExpiryDays)
+                {
+                    z.Dead = true;
+                    z.DiedTime = t;
+                }
+            }
+        }
+
+        // Merge rule: no new candidate within one band-width of a LIVE zone or of an
+        // existing candidate — the older one keeps its identity and touch count.
+        // Half-width is frozen at the pivot-series ATR of the reveal bar, because a
+        // zone is a fixed box on the chart and its edges cannot drift.
+        private void RevealPivot(double px, bool isHigh, double a)
+        {
+            double hw = PivotZoneWidthAtr * a;
+            foreach (PatternZoneShell.PivotZone z in _pivZones)
+                if (!z.Dead && Math.Abs(z.Px - px) < hw + z.HalfW)
+                    return;
+            foreach (PatternZoneShell.PivotCand cd in _pivCands)
+                if (Math.Abs(cd.Px - px) < hw + cd.HalfW)
+                    return;
+            _pivCands.Add(new PatternZoneShell.PivotCand { Px = px, HalfW = hw, Touches = 0, PivotHigh = isHigh });
+        }
+
+        // Born-to-now boxes, like PullbackZone's. Fixed brushes, distinct from the
+        // SlateGray session bands, and under the same DrawZones toggle.
+        private void DrawPivotZones()
+        {
+            if (!DrawZones || ChartControl == null)
+                return;
+            foreach (PatternZoneShell.PivotZone z in _pivZones)
+            {
+                Brush b = z.Dead ? Brushes.Gray : (z.PivotHigh ? Brushes.OrangeRed : Brushes.DodgerBlue);
+                Draw.Rectangle(this, Tag("PZ_PV" + z.Id), false,
+                    z.BornTime, z.Px + z.HalfW,
+                    z.Dead ? z.DiedTime : Time[0], z.Px - z.HalfW,
+                    b, b, z.Dead ? 4 : ZoneOpacityPct);
+            }
+        }
+
         // A reason the strategy WILL NOT TRADE goes to both the Log tab and the Output
         // window. Output is where the ENTRY lines land, so it is the only place the user
         // is actually watching; a run that declines to trade all day has to say why
@@ -467,6 +667,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             var bar = new PzBar { Time = t, Open = Open[0], High = High[0], Low = Low[0], Close = Close[0] };
             _atr.Update(bar);
             _atrBars++;
+
+            // Amendment 8. Runs from the PRIMARY branch, on every primary bar, and
+            // folds only pivot-series bars that have already closed. The series index
+            // is guarded rather than assumed: with the feature off it does not exist.
+            if (UseIntradayPivots && BarsArray.Length > PivIdx && CurrentBars[PivIdx] >= 0)
+                FoldClosedPivotBars();
 
             // NT8 stamps a bar at its CLOSE, so every session test below is on
             // the bar's START. Taking the start as a DateTime rather than
@@ -1603,6 +1809,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Round 50s", Description = "Off by default: on MNQ the 50s fire often enough to make the zone permission close to no filter at all.", GroupName = "02. Zones", Order = 7)]
         public bool UseRound50 { get; set; }
 
+        // Amendment 8 — intraday pivot zones, ported from PullbackZone. Dial names
+        // follow that strategy's where they map, with "15m" generalised because the
+        // series is configurable here.
+        [NinjaScriptProperty]
+        [Display(Name = "Intraday pivot zones", Description = "Add levels built from repeatedly-touched pivots on a separate intraday series, on top of the six session/round levels. A pivot becomes a zone after Min touches and carries its OWN band width.", GroupName = "02. Zones", Order = 8)]
+        public bool UseIntradayPivots { get; set; }
+
+        [NinjaScriptProperty, Range(1, 60)]
+        [Display(Name = "Pivot series (minutes)", Description = "The separate series the pivots are found on. Independent of the chart's own bar type — 5 is the validated default.", GroupName = "02. Zones", Order = 9)]
+        public int PivotSeriesMinutes { get; set; }
+
+        [NinjaScriptProperty, Range(1, 5)]
+        [Display(Name = "Pivot min touches", Description = "Touches before a pivot level becomes a zone. Touch = a pivot-series bar enters the band and closes back on the original side.", GroupName = "02. Zones", Order = 10)]
+        public int PivotMinTouches { get; set; }
+
+        [NinjaScriptProperty, Range(1, 10)]
+        [Display(Name = "Pivot K (bars)", Description = "Swing pivot lookback/forward on the pivot series. A pivot is usable only from its confirming bar's close.", GroupName = "02. Zones", Order = 11)]
+        public int PivotK { get; set; }
+
+        [NinjaScriptProperty, Range(0.05, 2.0)]
+        [Display(Name = "Pivot zone half-width (x ATR)", Description = "Half-width of the pivot band, frozen at the pivot series' ATR on the reveal bar. This is the band itself — the zone proximity allowance is added on top for permission, as with every other level.", GroupName = "02. Zones", Order = 12)]
+        public double PivotZoneWidthAtr { get; set; }
+
+        [NinjaScriptProperty, Range(0.0, 2.0)]
+        [Display(Name = "Pivot clean break (x ATR)", Description = "A pivot-series close beyond the far edge by more than this kills the zone.", GroupName = "02. Zones", Order = 13)]
+        public double PivotBreakAtr { get; set; }
+
+        [NinjaScriptProperty, Range(1, 20)]
+        [Display(Name = "Pivot expiry (calendar days)", Description = "A zone dies when the calendar day advances this far from its birth day — a Friday zone is dead on Monday.", GroupName = "02. Zones", Order = 14)]
+        public int PivotExpiryDays { get; set; }
+
         [NinjaScriptProperty, Range(1, 200)]
         [Display(Name = "Stop offset (ticks)", Description = "Entry stop, this far beyond the pattern's LAST defining swing extreme — the second top/bottom, the third extreme of a triple, or the right shoulder of a head & shoulders (not the head).", GroupName = "03. Entry", Order = 0)]
         public int StopOffsetTicks { get; set; }
@@ -1887,6 +2124,27 @@ namespace PatternZoneShell
                     g.Remove(key);
             }
         }
+    }
+
+    // Amendment 8: the two pivot-engine records, ported from PullbackZoneStrategy.cs
+    // (its Zone/Cand, :118-137). Plain data — the logic lives in the strategy.
+    public sealed class PivotZone
+    {
+        public int Id;
+        public double Px, HalfW;
+        public int Touches;
+        public bool PivotHigh;
+        public bool Dead;
+        public DateTime BornTime, DiedTime;
+        public DateTime BornDay;                   // calendar date, for the expiry rule
+    }
+
+    // A revealed pivot accumulating touches; not a zone until touch #MinTouches.
+    public sealed class PivotCand
+    {
+        public double Px, HalfW;
+        public int Touches;
+        public bool PivotHigh;
     }
 
     // Amendment 5: fills the "ATM template" dropdown from the templates saved on

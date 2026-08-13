@@ -246,6 +246,7 @@ written up in [`docs/design.md`](docs/design.md#amendments).
 |---|---|---|
 | Detection | Swing strength · top tolerance · head prominence · max pattern span · neckline break · min pattern height · prior-trend gate · trend lookback | 3 · 0.30 ATR · 0.30 ATR · 60 bars · 2 ticks · 1.5 ATR · on · 60 bars |
 | Zones | Zone half-width · zone proximity · six level toggles | 0.50 ATR · 0.50 ATR · all on except round 50s |
+| Pivot zones *(Amendment 8)* | Enable · series · min touches · pivot K · half-width · clean break · expiry | on · 5 min · 3 touches · 3 bars · 0.30 ATR · 0.25 ATR · 2 days |
 | Entry | Stop offset · stop buffer (add-on stop only) · target multiple | 10 ticks · 0.50 ATR · 1.0 × height |
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |
 | Risk | Contracts · max trades/session · window · daily loss limit | 1 · 3 · 09:30–15:55 ET · $200 |

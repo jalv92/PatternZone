@@ -162,6 +162,17 @@ namespace PatternZoneCore
         public double PriorClose = double.NaN, DayOpen = double.NaN;
     }
 
+    // Amendment 8. An intraday pivot zone carries its OWN half-width — frozen at
+    // the pivot series' ATR on the bar that revealed it — unlike the session and
+    // round levels, which are bare prices sharing the chart-ATR band computed in
+    // Permits. That is the whole reason this is a parallel set and not another
+    // entry in CandidateLevels. The shell computes them; the core only reads.
+    public struct PzZone
+    {
+        public double Price;
+        public double HalfWidth;
+    }
+
     // Permission rule of spec §5: extremes must cluster in ONE band around a
     // named or round level. Toggles/half-width read from cfg at call time
     // (not snapshotted) since PzConfig is mutable for the life of the engine.
@@ -169,6 +180,9 @@ namespace PatternZoneCore
     {
         private readonly PzConfig _cfg;
         private SessionLevels _levels = new SessionLevels();
+        // Shell-owned and mutated in place: null (or empty) whenever intraday
+        // pivots are off, which is what keeps the pre-amendment path unchanged.
+        private List<PzZone> _pivots;
 
         public ZoneEngine(PzConfig cfg)
         {
@@ -181,6 +195,11 @@ namespace PatternZoneCore
         }
 
         public SessionLevels Levels { get { return _levels; } }
+
+        public void SetPivotZones(List<PzZone> zones)
+        {
+            _pivots = zones;
+        }
 
         // Session levels (toggled on, non-NaN) first, then nearest round levels —
         // a named level beats a round number for reporting when both match.
@@ -237,6 +256,27 @@ namespace PatternZoneCore
                     return true;
                 }
             }
+
+            // Amendment 8. Named and round levels first — a pivot zone is the newest
+            // and least proven level class, so it never steals the reported reason
+            // from a level that already qualified. Proximity is applied the same way
+            // it is above: it means "how far outside a band still counts", so it adds
+            // to this band's own half-width rather than replacing the chart-ATR one.
+            if (_pivots != null)
+                foreach (PzZone z in _pivots)
+                {
+                    double phw = z.HalfWidth + _cfg.ZoneProximityAtr * atr;
+                    int count = 0;
+                    foreach (double e in p.ZoneExtremes)
+                        if (Math.Abs(e - z.Price) <= phw)
+                            count++;
+                    if (count >= required)
+                    {
+                        zoneLevel = z.Price;
+                        return true;
+                    }
+                }
+
             zoneLevel = 0.0;
             return false;
         }
@@ -637,6 +677,13 @@ namespace PatternZoneCore
         }
 
         public SessionLevels Levels { get { return _zones.Levels; } }
+
+        // Amendment 8: the shell hands its live pivot-zone list over ONCE and then
+        // mutates it in place, so there is no per-bar plumbing.
+        public void SetPivotZones(List<PzZone> zones)
+        {
+            _zones.SetPivotZones(zones);
+        }
 
         // Swings, consumed marks and the ATR recursion (shell-side) cross the
         // session boundary — structure does not restart at the open.
