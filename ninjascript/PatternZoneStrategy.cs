@@ -130,11 +130,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         // becomes a memory problem.
         private int _patternSeq;
 
+        // Seconds per bar on a TIME chart, 0 on every other bar type — the flag that
+        // picks the bar-start rule in OnBarUpdate, so it is never clamped to a default.
         private int _barSecs = 60;
-        // Only used when the previous close is too far back to be this bar's start
-        // (session gap, halt, first bar): the bar's own duration for a time chart,
-        // 1 second otherwise so a tick bar classifies by the side its ticks printed on.
-        private int _fallbackSecs = 60;
         private static readonly TimeSpan MaxBarSpan = TimeSpan.FromMinutes(30);
         private bool _rthOnlyWarned;
 
@@ -252,15 +250,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _barSecs = BarsPeriod.BarsPeriodType == BarsPeriodType.Minute
                     ? BarsPeriod.Value * 60
                     : (BarsPeriod.BarsPeriodType == BarsPeriodType.Second ? BarsPeriod.Value : 0);
-                // Amendment 4: every bar type is supported. The fallback only
-                // matters where the previous close is not this bar's start.
-                _fallbackSecs = _barSecs > 0 ? _barSecs : 1;
+                // Amendment 4: every bar type is supported. Minute and Second are
+                // the only time types classified above, and both always yield a
+                // positive value, so 0 means exactly "not a time chart".
                 if (_barSecs != 60)
                     Log(Name + ": primary series is " + BarsPeriod.Value + " " + BarsPeriod.BarsPeriodType
                         + " — supported, but every bar-count dial (trend lookback, max pattern span, pole/flag budgets) counts THIS chart's bars and the ATR scales to them, so the dials mean something different here. The validated baseline is 1 Minute.",
                         Cbi.LogLevel.Warning);
-                if (_barSecs <= 0)
-                    _barSecs = 60;
 
                 // EntriesPerDirection is baked at SetDefaults and cannot see the
                 // user's MaxAdds. Range(0, 5) blocks this from the UI; an XML
@@ -346,11 +342,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             // the bar stamped 00:00:00 belongs to the previous evening, and
             // keying the overnight accumulators off its close date would reset
             // them at midnight, halfway through the session they measure.
-            // A bar starts when the previous one closed — exact for every bar type
-            // (tick/volume/range/time). Across a halt or the session gap the previous
-            // close lies far back, so fall back to the close-side approximation.
-            TimeSpan span = CurrentBar > 0 ? t - Time[1] : TimeSpan.MaxValue;
-            DateTime barStart = span <= MaxBarSpan ? Time[1] : t.AddSeconds(-_fallbackSecs);
+            // Time charts: the stamp arithmetic is exact even across missing bars.
+            // (NT8 skips a minute with no trades, so Time[1] is NOT this bar's start
+            // there — that gap is what makes the prev-close rule wrong for them.)
+            // Everything else has no duration to subtract, so a bar starts when the
+            // previous one closed, with a cap for the session gap and halts.
+            DateTime barStart = _barSecs > 0
+                ? t.AddSeconds(-_barSecs)
+                : (CurrentBar > 0 && t - Time[1] <= MaxBarSpan ? Time[1] : t.AddSeconds(-1));
             int startSecs = (int)barStart.TimeOfDay.TotalSeconds;
             bool inRth = startSecs >= RthOpenSecs && startSecs < RthCloseSecs;
             bool inOn = !inRth && (startSecs >= OnOpenSecs || startSecs < RthOpenSecs);

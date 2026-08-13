@@ -274,14 +274,24 @@ detection engine was already bar-agnostic; the shell's session bookkeeping was
 not, because it derived a bar's start as `close − barSeconds`, which is
 meaningless for a tick/volume/range bar.
 
-9. **Any-bar-type session bookkeeping.** A bar's start is now the PREVIOUS
-   bar's close — exact for contiguous bars of every type. Across a session gap,
-   a halt, or on the first bar the previous close lies far back, so a 30-minute
-   cap falls back to the close-side approximation: the bar's own duration on a
-   time chart, **1 second** otherwise, which classifies a post-gap tick bar by
-   the side its ticks actually printed on. Everything downstream (`inRth` /
-   `inOn`, the overnight accumulators, the first-RTH-bar snapshot and `DayOpen`,
-   the window gates) reads `barStart` unchanged.
+9. **Any-bar-type session bookkeeping — and the rule splits by chart type.**
+   - **Time charts (Minute / Second) keep the stamp arithmetic**, `close −
+     barSeconds`, byte-identical to pre-amendment behavior. This is not a
+     fallback, it is the *correct* rule for them: NT8 **skips** a minute with no
+     trades, so there the previous bar's close is not this bar's start. Using it
+     silently misclassified the first RTH bar after a dead 09:28–09:30 as
+     overnight (the whole session-open block fired late) and a post-16:00 bar
+     after a dead close as RTH (prior close polluted). Caught in review.
+   - **Every other bar type** (tick / volume / range) has no duration to
+     subtract, so a bar starts when the previous one closed — exact for
+     contiguous bars. Across the session gap, a halt, or on the first bar a
+     30-minute cap falls back to `close − 1s`, which classifies a post-gap tick
+     bar by the side its ticks actually printed on.
+
+   `_barSecs` is the discriminator — positive on a time chart, 0 on every other
+   bar type, and deliberately never clamped to a default. Everything downstream
+   (`inRth` / `inOn`, the overnight accumulators, the first-RTH-bar snapshot and
+   `DayOpen`, the window gates) reads `barStart` unchanged.
 10. **The bar-type warning was reworded.** It no longer says the chart "does not
     run the strategy that was designed" — every bar type is supported now. It
     names the detected bar type and warns that all bar-count dials count THIS
