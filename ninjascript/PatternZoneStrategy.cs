@@ -1081,10 +1081,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double own = OwnDayPnl(true);
                 // A NaN contribution would make the group's SUM NaN, every comparison
                 // against it false, and the governor would die silently for EVERY
-                // instance. Publish nothing rather than that. (`_acctSessionDay` moving
-                // in lockstep with `_dayStartCum` already covers this; belt and braces,
-                // because the failure is silent and account-wide.)
-                dayPnl = gov.Publish(_govKey, double.IsNaN(own) ? 0 : own);
+                // instance. Fall back to REALIZED-ONLY rather than 0: a 0 would also
+                // drop this instance's realized loss from the total, so an account-wide
+                // loss limit would fire late — the unsafe direction. The ATM unrealized
+                // getter is the reachable NaN source; a throw from it already lands on
+                // realized-only, so both of its failure modes now degrade the same way.
+                // Safe by construction: `gov` is non-null only once `_acctSessionDay` is
+                // set, which is in lockstep with `_dayStartCum`, so the realized-only
+                // figure cannot itself be NaN here.
+                dayPnl = gov.Publish(_govKey, double.IsNaN(own) ? OwnDayPnl(false) : own);
             }
             else
                 dayPnl = OwnDayPnl(false);
