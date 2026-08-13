@@ -134,6 +134,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string _govAccount;
         private DateTime _acctSessionDay = DateTime.MinValue;
         private bool _acctWideWarned;              // one non-realtime warning per pass, not per bar
+        private bool _noTradeWarned;               // one "why no trades" line per pass
 
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
@@ -391,6 +392,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _rthOnlyWarned = false;
             _acctSessionDay = DateTime.MinValue;        // lockstep with _dayStartCum below
             _acctWideWarned = false;
+            _noTradeWarned = false;
             // Amendment 6. A Playback rewind moves this instance BACK to a day the shared
             // registry has already passed, and DailyGovernor.For refuses an older day —
             // which would leave account-wide mode silently inert for the rest of the run.
@@ -530,7 +532,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (!_rthOnlyWarned && !double.IsNaN(_prevRthClose) && double.IsNaN(_onHigh))
                     {
                         _rthOnlyWarned = true;
-                        Log(Name + ": a full RTH session opened with no overnight bars — the chart's session template looks RTH-only; OvernightHigh/Low will stay unavailable and the zone engine runs on fewer levels. Use the instrument's full ETH template.",
+                        Announce("a full RTH session opened with no overnight bars — the chart's session template looks RTH-only; OvernightHigh/Low will stay unavailable and the zone engine runs on fewer levels. Use the instrument's full ETH template.",
                             Cbi.LogLevel.Warning);
                     }
 
@@ -649,6 +651,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Cbi.LogLevel.Warning);
             }
             bool canTrade = !_lockout && inWindow && inRth && warm && !atmUnusable;
+            // The three silent terms — inWindow, inRth, warm — explained themselves
+            // nowhere, so a mis-set window looked exactly like a dead strategy. Once per
+            // pass, name the reason. ponytail: `warm` is in the gate rather than in the
+            // chain, so a session that never warms announces nothing — the 15-bar warmup
+            // is documented and a sub-15-bar session has nothing to say anyway.
+            if (!canTrade && !_noTradeWarned && warm)
+            {
+                _noTradeWarned = true;
+                Announce("no trades this bar and every bar like it — "
+                    + (_lockout ? "locked out" : !inRth ? "outside RTH" : !inWindow ? "outside the trading window" : "ATM unusable"),
+                    Cbi.LogLevel.Warning);
+            }
             List<PzAction> actions = _engine.OnBarClosed(bar, _atr.Value, canTrade);
 
             foreach (PzAction a in actions)

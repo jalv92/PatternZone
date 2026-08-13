@@ -29,15 +29,16 @@ detector that draws the wrong patterns.
 
 ---
 
-> **A run that takes no trades tells you why in the Output window.** Every reason
-> the strategy refuses to trade for the whole run — a blocked or missing ATM
-> template, ATM mode outside realtime, account-wide outside realtime, a daily
-> limit lockout — prints to the **Output** window, not only the Log tab. If a
-> whole session produced zero ENTRY lines AND zero other lines, that is not a
-> silent gate: it means the engine ran and found no qualifying pattern. Turn on
-> `DrawRejectedPatterns` to see what it refused and why. (Bug 2026-08-12: a
-> blocked ATM template produced a silent day because the explanation went only to
-> the Log tab.)
+> **A run that takes no trades tells you why in the Output window.** Every state
+> that stops trading names itself once, in **Output** as well as the Log tab: a
+> blocked or missing ATM template, ATM mode outside realtime, account-wide
+> outside realtime, a daily-limit lockout, and the three quiet gates — outside
+> RTH, outside the trading window, and the ATR warmup. **A session with zero
+> lines in BOTH Log and Output cannot happen.** Zero ENTRY lines with a
+> "no trades this bar and every bar like it" line means exactly what it says;
+> zero ENTRY lines with no such line means the engine ran and found no qualifying
+> pattern — turn on `DrawRejectedPatterns` to see what it refused and why.
+> (Bug 2026-08-12: a no-trading gate explained itself only in the Log tab.)
 
 ## Phase 0 — Prerequisites (the chart)
 
