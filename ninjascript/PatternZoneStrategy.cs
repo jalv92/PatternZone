@@ -129,6 +129,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         // — which is what keeps an instance with no baseline out of the shared sum.
         private string _govKey;
         private DateTime _acctSessionDay = DateTime.MinValue;
+        private bool _acctWideWarned;              // one non-realtime warning per pass, not per bar
 
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
@@ -359,6 +360,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _lockout = false;
             _rthOnlyWarned = false;
             _acctSessionDay = DateTime.MinValue;        // lockstep with _dayStartCum below
+            _acctWideWarned = false;
             // Amendment 6. A Playback rewind moves this instance BACK to a day the shared
             // registry has already passed, and DailyGovernor.For refuses an older day —
             // which would leave account-wide mode silently inert for the rest of the run.
@@ -588,6 +590,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Log(Name + ": ATM mode takes no trades here — " + (_atmBlocked
                         ? "the template is missing or unset."
                         : "ATM strategies never run on historical data. On a live chart this is just the warmup over loaded bars and trading starts when it reaches realtime; in the Strategy Analyzer it means the whole run."),
+                    Cbi.LogLevel.Warning);
+            }
+            // Amendment 6. The shared record is keyed by account NAME, and outside
+            // realtime that name is a virtual account every run shares — so in the
+            // Analyzer an optimization would pool unrelated iterations into ONE governor
+            // and let one iteration's breach lock out the others, silently. Same shape as
+            // the ATM warning above, including the "this is just the warmup" wording, so
+            // a live chart's historical pass does not read as an alarm.
+            if (AccountWide && State != State.Realtime && !_acctWideWarned)
+            {
+                _acctWideWarned = true;
+                Log(Name + ": account-wide daily limits are ON outside realtime. On a live chart this is just the warmup over loaded bars and the shared governor starts meaning something when the chart reaches realtime. In the Strategy Analyzer the account is virtual and shared by every iteration of the run, so an optimization pools unrelated iterations into one governor — leave account-wide OFF for backtests.",
                     Cbi.LogLevel.Warning);
             }
             bool canTrade = !_lockout && inWindow && inRth && warm && !atmUnusable;
