@@ -109,7 +109,8 @@ Armed only while a position is open (and adds remaining < `MaxAdds`):
 ## 9. Account risk
 
 - `Contracts` base (default 1 MNQ) + up to `MaxAdds` (default 1).
-- `DailyLossLimitUsd`: realized session P&L breaches → flatten + lockout for the day.
+- `DailyLossLimitUsd` / `DailyProfitTargetUsd`: session P&L at or beyond either → flatten + lockout for the day. One governor, two triggers; `0` disables a trigger (Amendment 6).
+- `AccountWide` (default off): measure both triggers against the SUM of the day P&L of every **PatternZone** instance on the account, one breach locking all of them out together. Not other strategies, not manual trades (Amendment 6).
 - `MaxTradesPerSession` (default 3; adds don't count as trades).
 - Trading window `TradingStart`–`TradingEnd` (default 09:30–15:55 ET), forced flat at end.
 
@@ -144,6 +145,8 @@ Statistical dials (frozen before any P&L is seen; changes = documented amendment
 | 26 | Contracts | 1 |
 | 27 | MaxTradesPerSession | 3 |
 | 28 | DailyLossLimitUsd | 200 |
+| 28a | DailyProfitTargetUsd *(Amendment 6)* | 0 (off) |
+| 28b | AccountWide *(Amendment 6)* | false |
 | 29–30 | TradingStart / TradingEnd | 09:30 / 15:55 ET |
 
 Cosmetic dials (free to change anytime): LongBrush, ShortBrush, AddonBrush, PatternOpacityPct (65), ZoneOpacityPct (10), PatternLineWidth (4), DrawZones (true), DrawRejectedPatterns (false).
@@ -321,12 +324,67 @@ templates once PatternZone has found the entry.
     ATM at a time; flat-to-flat is preserved because a live `atmId` is refused by
     the entry guard.
 13. **Strategy-level risk still binds.** The trading-window flatten and the
-    daily-loss lockout both call `AtmStrategyClose`, retried each bar until the
+    daily-limit lockout both call `AtmStrategyClose`, retried each bar until the
     poll sees flat. `SystemPerformance` never books an ATM trade, so each closed
     ATM's `GetAtmStrategyRealizedProfitLoss` is accumulated into the session
-    total that the daily-loss guard reads.
+    total that the daily-limit guard reads (and, in account-wide mode, the total
+    this instance publishes to the shared record — Amendment 6).
 14. **Two refusals, both loud, neither silent.** An empty or missing template
     blocks trading outright rather than falling back to the managed path — the
     user chose ATM deliberately. And `AtmStrategyCreate` is ignored on historical
     data, so in the Strategy Analyzer (and any non-realtime state) ATM mode takes
     **no trades at all** and says so once.
+
+**Amendment 6 — 2026-08-12 (pre-P&L). Shell only — the core is untouched.**
+Javier wants the daily-limits block he already has in LatigoBreak, here, behaving
+the same way: the same three controls, the same semantics. None of this is a
+trading decision, so `PatternZoneCore.cs` and its 141 assertions are unchanged.
+
+15. **One governor, two triggers.** `DailyProfitTargetUsd` (new, default `0` =
+    off) joins `DailyLossLimitUsd`. Either one, breached, calls the **same**
+    `Lockout()` the loss limit always called, so the profit target inherits every
+    behavior already built and tested: flatten the managed position, retry that
+    flatten each bar until flat, `AtmStrategyClose` a live ATM on the same bar,
+    and refuse entries until the next session open. There is no second lockout
+    path. `CheckDailyLoss` is renamed `CheckDailyLimits`, since it no longer only
+    checks a loss.
+16. **`AccountWide` (default off) switches only the number being measured.** Off,
+    the computation is the pre-amendment one, byte-for-byte: this instance's
+    realized session P&L plus its ATM total. On, the instance publishes its day
+    P&L into a shared per-account record and the triggers are measured against the
+    SUM of every contribution; a breach sets a broadcast flag that locks out every
+    other instance on that account on its next bar, including instances whose own
+    limits are `0` — those still publish, so they count toward everyone else's sum.
+
+    **What "account-wide" honestly means.** The registry is static, so the sum
+    covers **other PatternZone instances** — PatternZone on MNQ and PatternZone on
+    NQ share a governor. It does **not** include LatigoBreak, TBStrategy or manual
+    trades. The class ships public in the `PatternZoneShell` namespace
+    (`DailyGovernor`) precisely so another strategy *can* publish into it later and
+    make the governor genuinely cross-strategy; until one does, the dialog, the
+    startup log and the README all say "every PatternZone", never "your account".
+17. **Contributions, never `Account.Get(realized) + Account.Get(unrealized)`.**
+    Those are two separately-updated aggregates: the instant a winner's target
+    fills, realized is already credited while account unrealized still carries the
+    closed position, so their sum double-counts that trade and fires the profit
+    target early. LatigoBreak hit exactly this live on 2026-08-10 — a $750 target
+    flattened everything at $539 realized. Each instance's own numbers are
+    event-ordered on its own strategy thread, so the shared sum inherits that
+    consistency.
+18. **The two bases differ, deliberately.** The per-strategy path stays
+    **realized-only** (what it has always measured, and what the frozen spec
+    describes). The account-wide contribution **adds open P&L** — `Position`'s
+    unrealized, or `GetAtmStrategyUnrealizedProfitLoss` in ATM mode, since an ATM
+    position is invisible to `Position`. That is LatigoBreak's basis
+    (`LatigoBreakStrategy.cs:830-838`) and it is the protective one: a shared
+    governor exists to close the account before an account-level drawdown rule
+    fires, and prop firms measure open P&L. Practical difference: **on** catches a
+    big loser while it is still open; **off** only after the trade books.
+19. **Two silent-failure guards.** `_acctSessionDay` moves in lockstep with
+    `_dayStartCum` (set together at the RTH open, cleared together in `ResetAll`)
+    and a NaN contribution is published as `0`, because `_dayStartCum` is
+    deliberately NaN until the first session open and one NaN in the sum makes
+    every comparison false — the governor would die silently for the whole group.
+    And the registry wipe on reset is gated to a **Playback rewind** only: doing it
+    at `DataLoaded` too would mean disabling and re-enabling a strategy clears a
+    live breach broadcast, i.e. a daily limit you can escape with a checkbox.

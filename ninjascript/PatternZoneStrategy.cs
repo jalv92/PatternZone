@@ -24,9 +24,10 @@
 //
 // ORDERS: market entries, ONE aggregate stop + ONE aggregate target covering
 // every tranche (fromEntrySignal = "", live-until-cancelled, both legs always
-// resubmitted together), adds that re-price the stop only, a realized daily-loss
-// lockout and a window flatten. Drawing is pattern/flag geometry only — no
-// neckline, no text; full legs incl. lead-in/out (Amendments 1+3, decision #6).
+// resubmitted together), adds that re-price the stop only, a daily loss/profit
+// lockout — optionally measured across every PatternZone on the account
+// (Amendment 6) — and a window flatten. Drawing is pattern/flag geometry only —
+// no neckline, no text; full legs incl. lead-in/out (Amendments 1+3, decision #6).
 //
 // THE ORDER-EVENT RACE RULES THIS FILE. NT8 — Playback especially — can deliver
 // OnOrderUpdate/OnExecutionUpdate synchronously, in-stack, BEFORE the Enter*/
@@ -120,6 +121,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int _adds;                         // adds FILLED — names PZ_ADD1..n
         private double _stopPx, _targetPx;         // the live aggregate bracket, tick-rounded
         private double _dayStartCum;               // realized CumProfit at the session open
+        // Amendment 6, account-wide mode only. `_govKey` is this INSTANCE's identity in
+        // the shared registry (instrument plus a random suffix, so two charts on the same
+        // instrument are two contributors rather than one overwriting the other), and
+        // `_acctSessionDay` is the day it publishes under. It moves in lockstep with
+        // `_dayStartCum` — set together at the session open, cleared together in ResetAll
+        // — which is what keeps an instance with no baseline out of the shared sum.
+        private string _govKey;
+        private DateTime _acctSessionDay = DateTime.MinValue;
 
         private int _entriesWindowStartSecs, _cutoffSecs;
         private DateTime _lastBarTime = DateTime.MinValue;
@@ -216,7 +225,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MaxTradesPerSession = 3;
                 TradingStartHhmm = 930;
                 TradingEndHhmm = 1555;
+                // Amendment 6. Both new dials ship INERT: a live profit target would
+                // truncate the pending Phase 3/4 validation runs, and account-wide is
+                // off in LatigoBreak too. LatigoBreak ships a 500 target; PatternZone
+                // does not, deliberately.
+                DailyProfitTargetUsd = 0;
                 DailyLossLimitUsd = 200;
+                AccountWide = false;
 
                 DrawZones = true;
                 LongBrush = Brushes.MediumSeaGreen;
@@ -305,6 +320,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Log(Name + ": MaxAdds > 5 exceeds EntriesPerDirection (1 + 5) — adds beyond the 6th tranche will be refused by the order layer.",
                         Cbi.LogLevel.Warning);
 
+                // Amendment 6. Instrument first for a readable breach log, random suffix
+                // so two instances on the SAME instrument and account are two
+                // contributors rather than one silently overwriting the other.
+                _govKey = Instrument.FullName + "/" + Guid.NewGuid().ToString("N").Substring(0, 4);
+                if (AccountWide)
+                    Log(Name + ": account-wide daily limits are ON — the limits are measured against the SUM of every PATTERNZONE instance on this account, and a breach on any one of them flattens and locks out all of them. It does NOT include other strategies (LatigoBreak, TBStrategy) or manual trades: the sum is built from these instances' own numbers, never from the account's aggregates.",
+                        Cbi.LogLevel.Information);
+
                 ResetAll(false);
             }
         }
@@ -335,6 +358,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             _atrBars = 0;
             _lockout = false;
             _rthOnlyWarned = false;
+            _acctSessionDay = DateTime.MinValue;        // lockstep with _dayStartCum below
+            // Amendment 6. A Playback rewind moves this instance BACK to a day the shared
+            // registry has already passed, and DailyGovernor.For refuses an older day —
+            // which would leave account-wide mode silently inert for the rest of the run.
+            // Dropping the record lets the group re-form on the rewound day. ONLY on a
+            // rewind: doing this at DataLoaded too would mean a strategy restart wipes a
+            // live breach broadcast, i.e. a daily limit you can clear with a checkbox.
+            if (removeDrawings && Account != null)
+                PatternZoneShell.DailyGovernor.Forget(Account.Name);
 
             // Order state. A rewind discards the pass that owned these; anything
             // that pass left working reappears as an execution with nothing
@@ -473,6 +505,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // nowhere else, so the limit measures THIS session.
                     _dayStartCum = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
                     _atmDayRealized = 0;                   // the ATM half of the same baseline
+                    // Amendment 6: the shared registry's trading day, set with the
+                    // baseline it belongs to. A new day means a new record — every
+                    // instance's contribution AND the breach broadcast reset together.
+                    _acctSessionDay = barStart.Date;
                     _rthHigh = High[0];
                     _rthLow = Low[0];
                 }
@@ -502,18 +538,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             // backstop for the rest of the run. Flat means nothing is pending.
             if (flat)
                 _flattenPending = false;
-            // Second look at the daily loss: SystemPerformance books a trade when
+            // Second look at the daily limits: SystemPerformance books a trade when
             // the position closes, and if that booking lands after the execution
             // event that closed it, this is what catches it — a bar late, but
             // before any new entry, because it runs ahead of `canTrade`.
-            CheckDailyLoss();
+            CheckDailyLimits();
             CheckBracketCancels(t);
             // ATM mode: the template's fills reach no handler of ours, so this poll
             // IS the engine's state machine. Runs before the flatten arms below so a
             // trade that just closed is already known to be flat.
             PollAtm();
             if (_atmId.Length > 0 && (_lockout || startSecs >= _cutoffSecs))
-                CloseAtm(_lockout ? "daily-loss lockout" : "trading window closed");
+                CloseAtm(_lockout ? "daily limit lockout" : "trading window closed");
             // Went-flat retry net, same philosophy as the flatten retry below:
             // the bar loop is where anything the event handlers missed gets a
             // second look. OnExecutionUpdate's teardown is gated on Position
@@ -741,7 +777,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Name, pnl, _atmDayRealized));
             ClearAtm();
             _engine.OnPositionClosed();
-            CheckDailyLoss();
+            CheckDailyLimits();
         }
 
         private void ClearAtm()
@@ -942,19 +978,96 @@ namespace NinjaTrader.NinjaScript.Strategies
                 FlattenNow();
         }
 
-        // Realized only, and only against this session's baseline. `_dayStartCum`
-        // is NaN until the first session open; every comparison against NaN is
-        // false, so the guard is inert until it is armed.
-        private void CheckDailyLoss()
+        // This instance's day P&L against this session's baseline. `_dayStartCum` is
+        // NaN until the first session open; every comparison against NaN is false, so
+        // the guard is inert until it is armed.
+        //
+        // Realized only when `includeOpen` is false — the basis the per-strategy limits
+        // have always used. SystemPerformance never books an ATM trade, so the ATM total
+        // is added in: in managed mode it is 0, in ATM mode the SystemPerformance term is.
+        //
+        // `includeOpen` adds what is still on the table and is used ONLY by the
+        // account-wide sum (Amendment 6). That basis is deliberate, not an oversight:
+        // a shared governor exists to close the account before an account-level
+        // drawdown rule fires, prop firms measure open P&L, and a $1,200 loser sitting
+        // open on another chart is exactly what the switch is bought for. LatigoBreak
+        // measures the same way (LatigoBreakStrategy.cs:830-838).
+        private double OwnDayPnl(bool includeOpen)
         {
-            if (_lockout || DailyLossLimitUsd <= 0)
-                return;
-            // SystemPerformance never books an ATM trade, so the ATM total is added
-            // in. In managed mode it is 0; in ATM mode the SystemPerformance term is.
-            double realized = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - _dayStartCum
+            double pnl = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - _dayStartCum
                 + _atmDayRealized;
-            if (realized <= -DailyLossLimitUsd)
-                Lockout("daily loss " + realized.ToString("0", CultureInfo.InvariantCulture) + " USD");
+            if (!includeOpen)
+                return pnl;
+            if (Position.MarketPosition != MarketPosition.Flat)
+                return pnl + Position.GetUnrealizedProfitLoss(PerformanceUnit.Currency);
+            // An ATM position is invisible to `Position`, so ATM mode needs its own
+            // getter or account-wide would price an open ATM trade at zero.
+            if (_atmInPosition && _atmId.Length > 0)
+            {
+                try { return pnl + GetAtmStrategyUnrealizedProfitLoss(_atmId); }
+                catch { }
+            }
+            return pnl;
+        }
+
+        // The shared record for this account and trading day, or null when this instance
+        // must not take part: the switch is off, there is no account (some non-realtime
+        // contexts), no session baseline exists yet, or the group has already moved past
+        // this instance's day.
+        private PatternZoneShell.DailyGovernor.AccountDay CurrentAccountDay()
+        {
+            if (!AccountWide || Account == null || _acctSessionDay == DateTime.MinValue)
+                return null;
+            return PatternZoneShell.DailyGovernor.For(Account.Name, _acctSessionDay);
+        }
+
+        // Amendment 6. TWO triggers, ONE lockout — the loss limit and the profit target
+        // both end in the same Lockout() the loss limit has always used, so both inherit
+        // its flatten, its ATM close and its "no entries until the next session".
+        // `AccountWide` swaps only the number being measured: this instance's own day
+        // P&L, or the SUM across every PatternZone publishing to this account's record.
+        private void CheckDailyLimits()
+        {
+            if (_lockout)
+                return;
+
+            PatternZoneShell.DailyGovernor.AccountDay gov = CurrentAccountDay();
+            if (gov != null && gov.Breached)
+            {
+                // Honored even with both of THIS instance's limits at 0: the group
+                // breached, so this chart stops with it. That is the whole switch.
+                Lockout("account-wide daily limit hit on another PatternZone");
+                return;
+            }
+
+            double dayPnl;
+            if (gov != null)
+            {
+                // Published BEFORE the limits-off return below, deliberately: an instance
+                // with its own limits at 0 still has to count toward everyone else's sum.
+                double own = OwnDayPnl(true);
+                // A NaN contribution would make the group's SUM NaN, every comparison
+                // against it false, and the governor would die silently for EVERY
+                // instance. Publish nothing rather than that. (`_acctSessionDay` moving
+                // in lockstep with `_dayStartCum` already covers this; belt and braces,
+                // because the failure is silent and account-wide.)
+                dayPnl = gov.Publish(_govKey, double.IsNaN(own) ? 0 : own);
+            }
+            else
+                dayPnl = OwnDayPnl(false);
+
+            if (DailyLossLimitUsd <= 0 && DailyProfitTargetUsd <= 0)
+                return;
+            bool hitTarget = DailyProfitTargetUsd > 0 && dayPnl >= DailyProfitTargetUsd;
+            bool hitLoss = DailyLossLimitUsd > 0 && dayPnl <= -DailyLossLimitUsd;
+            if (!hitTarget && !hitLoss)
+                return;
+
+            if (gov != null)
+                gov.Breached = true;                   // broadcast: the rest lock out on their next bar
+            Lockout("daily " + (hitTarget ? "profit target " : "loss ")
+                + dayPnl.ToString("0", CultureInfo.InvariantCulture) + " USD"
+                + (gov != null ? ", account-wide [" + gov.Breakdown() + "]" : ""));
         }
 
         // Chart-only feedback for WHY the strategy entered — semi-transparent
@@ -1241,7 +1354,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _entryOrder = null;
 
             _engine.OnPositionClosed();
-            CheckDailyLoss();
+            CheckDailyLimits();
         }
 
         protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
@@ -1452,9 +1565,21 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Window end (ET HHMM)", Description = "No entries at/after this time; any position is flattened.", GroupName = "05. Risk", Order = 3)]
         public int TradingEndHhmm { get; set; }
 
+        // Amendment 6 — the daily-limits block, ported from LatigoBreak for parity across
+        // Javier's strategies. Kept in "05. Risk" rather than a group of its own so the
+        // existing group numbering survives; the three sit together at the bottom of it,
+        // in the order LatigoBreak shows them (target, limit, account-wide).
         [NinjaScriptProperty, Range(0, 100000)]
-        [Display(Name = "Daily loss limit ($)", Description = "Realized session loss at or beyond this flattens and locks out until the next session. 0 = off.", GroupName = "05. Risk", Order = 4)]
+        [Display(Name = "Daily profit target (USD)", Description = "Realized session profit at or beyond this flattens and locks out until the next session — the winning half of the same governor as the loss limit. 0 = off.", GroupName = "05. Risk", Order = 4)]
+        public double DailyProfitTargetUsd { get; set; }
+
+        [NinjaScriptProperty, Range(0, 100000)]
+        [Display(Name = "Daily loss limit (USD)", Description = "Realized session loss at or beyond this flattens and locks out until the next session. 0 = off.", GroupName = "05. Risk", Order = 5)]
         public double DailyLossLimitUsd { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Account-wide (all markets)", Description = "Measure the two limits above against the SUM of the day P&L of every PATTERNZONE instance on this account, so one breach flattens and locks out all of them together. Other strategies and manual trades are NOT included. The shared total also counts OPEN P&L, unlike the per-strategy limits. OFF = this instance's own realized P&L only.", GroupName = "05. Risk", Order = 6)]
+        public bool AccountWide { get; set; }
 
         // Cosmetic dials — spec section 10 leaves these free to change anytime.
         [NinjaScriptProperty]
@@ -1521,6 +1646,104 @@ namespace NinjaTrader.NinjaScript.Strategies
 // namespace is how a CS0101 duplicate-type clash starts (the TrapFlow gap).
 namespace PatternZoneShell
 {
+    // Amendment 6: the shared day governor behind "Account-wide (all markets)".
+    // STATIC state, so one record per account is shared by every strategy instance
+    // in the NT8 process that publishes into it — today that is PatternZone only,
+    // which is exactly what the dialog and the README claim. Public and neutrally
+    // named (not nested in the strategy) so another strategy CAN adopt it later and
+    // make the governor genuinely cross-strategy; until one does, "account-wide"
+    // means "every PatternZone on this account".
+    //
+    // Per-instance CONTRIBUTIONS, never Account.Get(realized) + Account.Get(unrealized):
+    // those are two separately-updated aggregates. The instant a winner's target fills,
+    // realized is already credited while account unrealized still carries the closed
+    // position, so their sum double-counts that trade and fires the profit target early.
+    // LatigoBreak hit exactly that live on 2026-08-10 — a $750 target flattened
+    // everything at $539 realized. Each instance's own SystemPerformance/Position pair
+    // is event-ordered on its own strategy thread, so the shared sum inherits that
+    // consistency. (LatigoBreakStrategy.cs:117-129.)
+    public static class DailyGovernor
+    {
+        // One trading day of one account. `Breached` is the broadcast: the instance
+        // that trips a limit sets it, and every other instance locks out on its next
+        // bar — volatile because those instances run on their own strategy threads.
+        public sealed class AccountDay
+        {
+            public DateTime Day;
+            // Volatile on the PRIVATE field, exposed through a plain property: a public
+            // volatile field is not CLS-compliant (CS3026) and NT8's assembly is marked
+            // CLS-compliant, so the obvious spelling would ship a new warning.
+            private volatile bool _breached;
+            public bool Breached
+            {
+                get { return _breached; }
+                set { _breached = value; }
+            }
+            private readonly Dictionary<string, double> _pnl = new Dictionary<string, double>();
+
+            // Publish this instance's contribution and read the group total back in one
+            // atomic step — a publish that raced a sum could total a half-updated group.
+            public double Publish(string key, double pnl)
+            {
+                lock (_pnl)
+                {
+                    _pnl[key] = pnl;
+                    double total = 0;
+                    foreach (double v in _pnl.Values)
+                        total += v;
+                    return total;
+                }
+            }
+
+            // "MNQ 09-26/4f2a -412.50; ES 09-26/9c01 120.00; " — which instrument put
+            // the group where it is. Only ever built on the bar a limit actually trips.
+            public string Breakdown()
+            {
+                var sb = new System.Text.StringBuilder();
+                lock (_pnl)
+                    foreach (KeyValuePair<string, double> kv in _pnl)
+                        sb.Append(kv.Key).Append(' ')
+                          .Append(kv.Value.ToString("0.00", CultureInfo.InvariantCulture))
+                          .Append("; ");
+                return sb.ToString();
+            }
+        }
+
+        private static readonly Dictionary<string, AccountDay> Accounts = new Dictionary<string, AccountDay>();
+
+        // Fetch-or-create for one account's CURRENT day. Called on every governor tick
+        // and never cached by the caller, so a wipe-and-recreate cannot split the group.
+        // Null when the registry has already moved to a LATER day than the caller's: an
+        // instance still grinding through history must not push yesterday's numbers into
+        // today's total. A newer day replaces the record outright, which is what resets
+        // both the contributions and the breach broadcast at a session rollover.
+        public static AccountDay For(string account, DateTime day)
+        {
+            lock (Accounts)
+            {
+                AccountDay g;
+                Accounts.TryGetValue(account, out g);
+                if (g != null && g.Day > day)
+                    return null;
+                if (g == null || g.Day < day)
+                {
+                    g = new AccountDay { Day = day, Breached = false };
+                    Accounts[account] = g;
+                }
+                return g;
+            }
+        }
+
+        // Drop an account's record so the group can re-form on an EARLIER day. Only a
+        // Playback rewind needs this (see ResetAll) — `For` refuses an older day, so
+        // without it a rewound run would leave shared mode silently inert.
+        public static void Forget(string account)
+        {
+            lock (Accounts)
+                Accounts.Remove(account);
+        }
+    }
+
     // Amendment 5: fills the "ATM template" dropdown from the templates saved on
     // THIS machine, the same folder Chart Trader's ATM selector reads.
     // StringConverter, not TypeConverter: GetStandardValuesExclusive = false lets a

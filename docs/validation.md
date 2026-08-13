@@ -239,6 +239,29 @@ the parts no unit test can reach.
       open) re-arms trading with a fresh baseline** — the limit measures one
       session, not the run.
 
+- [ ] **6b. Daily profit target (Amendment 6).**
+      Same exercise on the winning side: set `DailyProfitTargetUsd` low enough to
+      be reachable and confirm the hit **flattens and locks out** exactly like the
+      loss limit — the log line reads `daily profit target N USD`, the managed
+      position goes flat, and in ATM mode a live ATM is closed on the same bar
+      (`closing ATM (daily limit lockout)`). Then confirm the next RTH open
+      re-arms it.
+
+- [ ] **6c. Account-wide (Amendment 6). Two charts, one account.**
+      Run PatternZone on two instruments (MNQ and NQ) on the same account with
+      **Account-wide** ticked on both. Drive ONE of them into its loss limit and
+      confirm the other **locks out on its next closed bar without having traded**,
+      with a log line naming the account-wide total and the per-instrument
+      breakdown. Then confirm the honest scope: a breach in PatternZone does
+      **not** stop LatigoBreak or any other strategy on that account — only
+      PatternZone instances publish into the shared record.
+
+- [ ] **6d. Account-wide survives a restart, resets on the day.**
+      After 6c, disable and re-enable the locked-out strategy **in the same
+      session**: it must re-lock immediately rather than resume trading (the breach
+      broadcast outlives a strategy restart on purpose). The next RTH open must
+      then clear both the broadcast and every contribution.
+
 - [ ] **8. ATM mode (only if you intend to trade it).** Realtime or Playback
       only. Tick `UseAtmStrategy`, pick a template, and confirm in order:
       the entry arrives as an **ATM strategy** (Chart Trader shows it, and its
@@ -297,6 +320,11 @@ Setup, all of it mandatory:
       Analyzer ignores `AtmStrategyCreate` entirely (it is not backtestable), so
       an ATM-mode Analyzer run takes zero trades. Phase 3 measures the managed
       path or it measures nothing.
+- [ ] **`AccountWide` OFF, and `DailyProfitTargetUsd` at 0 — both are the
+      defaults, confirm them anyway (Amendment 6).** A live profit target
+      truncates sessions and makes the run un-comparable with the pre-registered
+      table; account-wide keys its shared record by account name, which in the
+      Analyzer is one virtual account shared by every optimization iteration.
 
 ### The gate table (house table, MNQ-scaled)
 
@@ -413,6 +441,10 @@ to fix during validation — they are decisions with reasons.
 | In **ATM mode** the strategy is signals + entry only; everything after the fill belongs to the template | Amendment 5, and it is the whole point of the mode. The ATM template supplies the stop, the target and the position size, so the stop offset/buffer, target multiple and `Contracts` all do nothing, the flag add-on is disabled, and PatternZone's own bracket is never submitted. What PatternZone still owns: which pattern trades, the trading-window flatten, and the daily-loss lockout (fed from the ATM's own realized PnL, since `SystemPerformance` never books an ATM trade). Phase 3 must run with ATM **off**. |
 | On a **tick/volume/range** chart, a bar straddling 09:30 counts as overnight | Amendment 4. A bar belongs to the session it *began* in, so a bar whose ticks run 09:29:50 → 09:30:12 is overnight: its post-open ticks count toward the overnight range, and `DayOpen` becomes the open of the first bar that starts fully inside RTH — seconds after the 09:30:00 print. Time charts are unaffected (their bar start is exact). |
 | A pattern is permitted whose extreme sits **visibly outside** the drawn zone band | Amendment 1. Permission uses half-width + `ZoneProximityAtr` (1.00×ATR at the defaults); the drawing paints the half-width alone (0.50×ATR). Not a drawing bug and not a permission bug — the two were separated on purpose so near-the-level patterns qualify without fattening every painted band. |
+| **Account-wide** reaches this instance only on its **next closed bar** | Amendment 6. PatternZone is `Calculate.OnBarClose` with no tick series, so a breach broadcast by another instrument is acted on at the next bar close — up to 60 s on the 1-minute baseline, and unbounded on a tick/volume/range chart where a bar can take arbitrarily long to close. LatigoBreak reacts within the second because it carries a 1-tick series; adding one here would be a far larger change than this amendment, and the strategy's own limits still act immediately on the event paths (a closing fill, an ATM close). |
+| **Account-wide sums PatternZone instances only** — not LatigoBreak, not TBStrategy, not manual trades | Amendment 6, and it is what the mechanism can honestly deliver: the total is built from each instance's own event-ordered numbers rather than the account's aggregates, which double-count a trade the instant its target fills (LatigoBreak, live, 2026-08-10: a $750 target flattened everything at $539 realized). The registry is public (`PatternZoneShell.DailyGovernor`) so other strategies can publish into it later; until they do, the label "all markets" means all of *your PatternZone* markets. |
+| With **Account-wide ON** the limits also count **open** P&L; with it OFF they stay **realized-only** | Amendment 6, deliberate asymmetry. Off is the frozen per-strategy behavior, unchanged byte-for-byte. On adds unrealized because a shared governor exists to close everything before an account-level drawdown rule fires and prop firms measure open P&L — so a $1,200 loser still open on another chart has to be visible. Consequence to expect in testing: the same P&L can trip the limit *earlier* with the switch on. |
+| **Account-wide in the Strategy Analyzer is untested and should stay OFF** | Amendment 6, stated honestly rather than guessed. The shared record is keyed by `Account.Name`, and in the Analyzer that is one virtual account: if it is non-null there, every concurrently-running optimization iteration would publish into the SAME governor and one iteration's breach would lock out the others — silently corrupting the run. Phase 3 and every optimization must run with `AccountWide` **off** (which is the default). Its home is realtime and Playback. |
 | Spec §7's flag condition that **net drift be flat or against the position** is not a separate check in the code | Deliberate, and recorded here pre-P&L so the frozen strategy is unambiguous. Drift is already bounded from both sides: the envelope cap (`FlagRangeMaxAtr` × ATR) caps how far the consolidation can travel, and the no-close-beyond-the-pole-extreme rule restarts the flag the moment price pushes on in favour. The frozen machine ships without the explicit test; adding one later is an amendment, not a fix. |
 
 ---

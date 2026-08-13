@@ -142,7 +142,19 @@ position does nothing at all.
 
 **Risk.** One position at a time, flat to flat. Three base entries per session
 (adds do not count). A realised daily loss of $200 flattens and locks out until
-the next RTH open. Forced flat at 15:55 ET.
+the next RTH open, and a daily profit target does the same on the winning side
+(off by default). Forced flat at 15:55 ET.
+
+**Shared daily limits across markets.** Tick **Account-wide (all markets)** and
+the two daily limits stop measuring this chart and start measuring the **sum of
+every PatternZone instance running on the account** — MNQ and NQ and anything
+else — so one breach flattens and locks all of them out together. Honest scope:
+the sum is built from those instances' own numbers, so it covers PatternZone and
+nothing else — not LatigoBreak, not TBStrategy, not manual trades. Making it
+genuinely cross-strategy needs those strategies publishing into the same shared
+record (`PatternZoneShell.DailyGovernor`, public for exactly that reason); that
+is future work, not what ships here. In this mode the total also counts **open**
+P&L, so a big loser is caught before it closes.
 
 **On the chart.** Every traded pattern draws its own geometry over the candles —
 the M or W polyline **including the legs into and out of it**, the flag's pole
@@ -223,11 +235,12 @@ The first trade is possible on the 15th bar (ATR warmup).
 
 **Statistical dials — frozen.** These were fixed before any P&L was seen.
 Changing one is a pre-registered amendment that earns its own out-of-sample run,
-not a tweak. Five amendments have been made so far — the stop rule and zone
+not a tweak. Six amendments have been made so far — the stop rule and zone
 proximity allowance, the prior-trend gate, the completed drawing legs, any-bar-type
-session bookkeeping and optional ATM mode — all on 2026-08-12, all from
-watching the detector draw, and all while no P&L existed. They are written up
-in [`docs/design.md`](docs/design.md#amendments).
+session bookkeeping, optional ATM mode and the daily profit/loss limits with their
+account-wide option — all on 2026-08-12, all from watching the detector draw or
+from matching the sibling strategies, and all while no P&L existed. They are
+written up in [`docs/design.md`](docs/design.md#amendments).
 
 | Group | Parameters | Defaults |
 |---|---|---|
@@ -236,6 +249,7 @@ in [`docs/design.md`](docs/design.md#amendments).
 | Entry | Stop offset · stop buffer (add-on stop only) · target multiple | 10 ticks · 0.50 ATR · 1.0 × height |
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |
 | Risk | Contracts · max trades/session · window · daily loss limit | 1 · 3 · 09:30–15:55 ET · $200 |
+| Daily limits | Daily profit target · account-wide (all markets) | off (0) · off |
 | ATM | Use ATM strategy · ATM template | off · (none) |
 
 **Cosmetic dials — free.** Zone drawing, the three brushes, pattern and zone
