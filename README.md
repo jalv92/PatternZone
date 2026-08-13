@@ -151,6 +151,27 @@ with a roof; with them the shape reads the way a human draws it. No neckline (it
 was drawn in the first build and taken out after looking at it), and no text
 anywhere: the chart shows *why* it entered without becoming a dashboard.
 
+## ATM mode
+
+Optional. Tick **Use ATM strategy**, pick one of your NT8 **ATM strategy
+templates** from the dropdown (it lists the templates saved on this machine, in
+`Documents\NinjaTrader 8\templates\AtmStrategy` — the same list Chart Trader
+shows), and PatternZone hands each entry to that template.
+
+The template then **owns the trade**. It supplies the stop and the target, so the
+stop offset, stop buffer and target multiple do nothing; the flag add-on is
+disabled; and PatternZone's own bracket is never submitted. What PatternZone
+still owns is which pattern trades at all, the trading-window flatten, and the
+daily-loss lockout — the last one fed from the ATM's own realized P&L, because
+NT8's `SystemPerformance` never books an ATM trade.
+
+Two things it deliberately will not do. A missing or unknown template name stops
+trading entirely rather than quietly reverting to the built-in bracket, since
+choosing ATM was deliberate. And because NT8 ignores `AtmStrategyCreate` on
+historical data, ATM mode takes **no trades in the Strategy Analyzer** — it is a
+realtime and Playback feature, which is also why
+[`docs/validation.md`](docs/validation.md) requires Phase 3 to run with ATM off.
+
 ## Bar types
 
 The strategy is **bar-type agnostic** — 1-minute, 30-second, 150-tick, volume or
@@ -201,8 +222,9 @@ The first trade is possible on the 15th bar (ATR warmup).
 
 **Statistical dials — frozen.** These were fixed before any P&L was seen.
 Changing one is a pre-registered amendment that earns its own out-of-sample run,
-not a tweak. Three amendments have been made so far — the stop rule and zone
-proximity allowance, the prior-trend gate, and the completed drawing legs — all on 2026-08-12, all from
+not a tweak. Five amendments have been made so far — the stop rule and zone
+proximity allowance, the prior-trend gate, the completed drawing legs, any-bar-type
+session bookkeeping and optional ATM mode — all on 2026-08-12, all from
 watching the detector draw, and all while no P&L existed. They are written up
 in [`docs/design.md`](docs/design.md#amendments).
 
@@ -213,6 +235,7 @@ in [`docs/design.md`](docs/design.md#amendments).
 | Entry | Stop offset · stop buffer (add-on stop only) · target multiple | 10 ticks · 0.50 ATR · 1.0 × height |
 | Add-on | Enable · pole min/max · flag min/max bars · flag max range · min room to target · max adds | on · 2.0 ATR / 8 bars · 3–10 bars · 1.0 ATR · 1.5 ATR · 1 |
 | Risk | Contracts · max trades/session · window · daily loss limit | 1 · 3 · 09:30–15:55 ET · $200 |
+| ATM | Use ATM strategy · ATM template | off · (none) |
 
 **Cosmetic dials — free.** Zone drawing, the three brushes, pattern and zone
 opacity (65% and 10%), pattern line width (4), and rejected-pattern drawing can

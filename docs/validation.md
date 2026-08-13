@@ -239,6 +239,19 @@ the parts no unit test can reach.
       open) re-arms trading with a fresh baseline** — the limit measures one
       session, not the run.
 
+- [ ] **8. ATM mode (only if you intend to trade it).** Realtime or Playback
+      only. Tick `UseAtmStrategy`, pick a template, and confirm in order:
+      the entry arrives as an **ATM strategy** (Chart Trader shows it, and its
+      own stop/target appear in the Orders tab — ours do not); **no flag add**
+      ever fires; the **15:55 window flatten closes the ATM** (a `closing ATM`
+      print, then the position and the template's brackets are gone); the
+      **daily-loss lockout counts ATM PnL** (lower the limit, take a losing ATM
+      trade, confirm the lockout — `SystemPerformance` does not see these trades,
+      so this is the only thing proving the accumulator works). Then check the
+      two refusals: an unknown template name → an error in the log and **no
+      trades**; the same setup in the Strategy Analyzer → one warning and **no
+      trades**, never a silent fallback to the managed path.
+
 - [ ] **7. At least one full session with `Contracts > 1`.**
       Every partial-fill path in the order layer is unreachable at the default
       of 1 contract, which means the default configuration never exercises them.
@@ -280,6 +293,10 @@ Setup, all of it mandatory:
       **≈ $2.3–2.5 per round turn per contract**.
 - [ ] **Defaults untouched.** No optimizer, no walk-forward, no parameter
       search. One run.
+- [ ] **`UseAtmStrategy` OFF — always, and this is not optional.** The Strategy
+      Analyzer ignores `AtmStrategyCreate` entirely (it is not backtestable), so
+      an ATM-mode Analyzer run takes zero trades. Phase 3 measures the managed
+      path or it measures nothing.
 
 ### The gate table (house table, MNQ-scaled)
 
@@ -393,6 +410,7 @@ to fix during validation — they are decisions with reasons.
 | **After a rejected add**, the engine takes no more adds for that trade | Fails safe. Re-arming the detector would need an anchor fill price the order layer never received, so the choice is between guessing and stopping. It stops. |
 | A **holiday or otherwise bar-less overnight** leaves the *previous* night's range standing as the overnight level, silently | Accepted residual. The overnight accumulators only roll over when overnight bars actually arrive, so a missing night inherits. Rare, and the failure direction is a stale level rather than a wrong one. |
 | `PatternOpacityPct` / `ZoneOpacityPct` / `PatternLineWidth` are editable in the strategy dialog but **do not appear in the optimizer** | Deliberate. They are cosmetic dials; dropping `[NinjaScriptProperty]` takes them off the optimizable-parameter list while leaving them grid-editable. Nothing about how the chart looks should ever be searched over. |
+| In **ATM mode** the strategy is signals + entry only; everything after the fill belongs to the template | Amendment 5, and it is the whole point of the mode. The ATM template supplies the stop and target, so the stop offset/buffer and target multiple do nothing, the flag add-on is disabled, and PatternZone's own bracket is never submitted. What PatternZone still owns: which pattern trades, the trading-window flatten, and the daily-loss lockout (fed from the ATM's own realized PnL, since `SystemPerformance` never books an ATM trade). Phase 3 must run with ATM **off**. |
 | On a **tick/volume/range** chart, a bar straddling 09:30 counts as overnight | Amendment 4. A bar belongs to the session it *began* in, so a bar whose ticks run 09:29:50 → 09:30:12 is overnight: its post-open ticks count toward the overnight range, and `DayOpen` becomes the open of the first bar that starts fully inside RTH — seconds after the 09:30:00 print. Time charts are unaffected (their bar start is exact). |
 | A pattern is permitted whose extreme sits **visibly outside** the drawn zone band | Amendment 1. Permission uses half-width + `ZoneProximityAtr` (1.00×ATR at the defaults); the drawing paints the half-width alone (0.50×ATR). Not a drawing bug and not a permission bug — the two were separated on purpose so near-the-level patterns qualify without fattening every painted band. |
 | Spec §7's flag condition that **net drift be flat or against the position** is not a separate check in the code | Deliberate, and recorded here pre-P&L so the frozen strategy is unambiguous. Drift is already bounded from both sides: the envelope cap (`FlagRangeMaxAtr` × ATR) caps how far the consolidation can travel, and the no-close-beyond-the-pole-extreme rule restarts the flag the moment price pushes on in favour. The frozen machine ships without the explicit test; adding one later is an amendment, not a fix. |

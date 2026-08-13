@@ -40,6 +40,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
+using System.IO;                              // ATM template dropdown (Amendment 5)
 using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Cbi;
@@ -130,6 +131,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         // becomes a memory problem.
         private int _patternSeq;
 
+        // --- ATM mode (Amendment 5) -----------------------------------------
+        // The ATM template owns the trade once it is created: NT8 manages its own
+        // brackets, and an ATM position is invisible to Position/OnExecutionUpdate,
+        // so the engine's state machine is driven by POLLING these ids each bar.
+        // Empty id = no live ATM.
+        private string _atmId = string.Empty, _atmOrderId = string.Empty;
+        private bool _atmPending;                  // created, entry not filled yet
+        private bool _atmInPosition;               // entry filled, ATM holding
+        private double _atmDayRealized;            // ATM PnL this session — SystemPerformance never sees it
+        private bool _atmBlocked;                  // config unusable: never trade
+        private bool _atmUnusableWarned;
+
         // Seconds per bar on a TIME chart, 0 on every other bar type — the flag that
         // picks the bar-start rule in OnBarUpdate, so it is never clamped to a default.
         private int _barSecs = 60;
@@ -204,6 +217,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 LongBrush = Brushes.MediumSeaGreen;
                 ShortBrush = Brushes.IndianRed;
                 AddonBrush = Brushes.Goldenrod;
+                UseAtmStrategy = false;
+                AtmTemplateName = "";
+
                 PatternOpacityPct = 65;
                 ZoneOpacityPct = 10;
                 PatternLineWidth = 4;
@@ -233,7 +249,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     StopOffsetTicks = StopOffsetTicks,
                     StopBufferAtr = StopBufferAtr,
                     TargetMultiple = TargetMultiple,
-                    EnableFlagAddon = EnableFlagAddon,
+                    // Amendment 5: in ATM mode the template owns everything after
+                    // the entry, so the engine must never emit an add. Forced here,
+                    // shell-side — the core has no idea ATM exists.
+                    EnableFlagAddon = EnableFlagAddon && !UseAtmStrategy,
                     PoleMinAtr = PoleMinAtr,
                     PoleMaxBars = PoleMaxBars,
                     FlagMinBars = FlagMinBars,
@@ -257,6 +276,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Log(Name + ": primary series is " + BarsPeriod.Value + " " + BarsPeriod.BarsPeriodType
                         + " — supported, but every bar-count dial (trend lookback, max pattern span, pole/flag budgets) counts THIS chart's bars and the ATR scales to them, so the dials mean something different here. The validated baseline is 1 Minute.",
                         Cbi.LogLevel.Warning);
+
+                // Amendment 5. A user who ticked ATM on chose it deliberately, so a
+                // broken template NEVER silently falls back to the managed path —
+                // it blocks trading outright.
+                if (UseAtmStrategy)
+                {
+                    string tpl = (AtmTemplateName ?? string.Empty).Trim();
+                    _atmBlocked = tpl.Length == 0 || !File.Exists(Path.Combine(AtmTemplateDir, tpl + ".xml"));
+                    if (_atmBlocked)
+                        Log(Name + ": ATM mode is ON but the template \"" + tpl + "\" is empty or not found in "
+                            + AtmTemplateDir + " — NO trading. Pick a template from the dropdown (it lists the ATM templates saved on this machine).",
+                            Cbi.LogLevel.Error);
+                    else
+                        Log(Name + ": ATM mode ON, template \"" + tpl + "\". The template now OWNS the trade after entry — it supplies the stop and target, so Stop offset, Stop buffer and Target multiple are ignored, and the flag add-on is DISABLED. PatternZone still decides the entry, the trading window flatten and the daily-loss lockout.",
+                            Cbi.LogLevel.Information);
+                }
 
                 // EntriesPerDirection is baked at SetDefaults and cannot see the
                 // user's MaxAdds. Range(0, 5) blocks this from the UI; an XML
@@ -299,6 +334,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Order state. A rewind discards the pass that owned these; anything
             // that pass left working reappears as an execution with nothing
             // behind it, which OnExecutionUpdate flattens on sight.
+            // A rewind discards the pass that owned the ATM. It keeps running in NT8
+            // with nobody watching it, so say so and try to close it before letting go.
+            if (_atmId.Length > 0)
+            {
+                Log(Name + ": a live ATM (" + _atmId + ") was orphaned by a reset — attempting to close it. Check the Orders tab.",
+                    Cbi.LogLevel.Warning);
+                CloseAtm("orphaned by reset");
+            }
+            ClearAtm();
+            _atmDayRealized = 0;
+            _atmUnusableWarned = false;
+
             _pendingAction = null; _pendingAdd = null;
             _entrySig = null; _addSig = null;
             _entryPending = false; _addPending = false; _flattenPending = false;
@@ -420,6 +467,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // Baseline for the realized daily loss. Snapshotted here and
                     // nowhere else, so the limit measures THIS session.
                     _dayStartCum = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
+                    _atmDayRealized = 0;                   // the ATM half of the same baseline
                     _rthHigh = High[0];
                     _rthLow = Low[0];
                 }
@@ -455,6 +503,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             // before any new entry, because it runs ahead of `canTrade`.
             CheckDailyLoss();
             CheckBracketCancels(t);
+            // ATM mode: the template's fills reach no handler of ours, so this poll
+            // IS the engine's state machine. Runs before the flatten arms below so a
+            // trade that just closed is already known to be flat.
+            PollAtm();
+            if (_atmId.Length > 0 && (_lockout || startSecs >= _cutoffSecs))
+                CloseAtm(_lockout ? "daily-loss lockout" : "trading window closed");
             // Went-flat retry net, same philosophy as the flatten retry below:
             // the bar loop is where anything the event handlers missed gets a
             // second look. OnExecutionUpdate's teardown is gated on Position
@@ -481,7 +535,21 @@ namespace NinjaTrader.NinjaScript.Strategies
             // inRth as well as inWindow: TradingStartHhmm can be set before the
             // open, and the six permission levels are all previous-session
             // aggregates — at 03:00 they describe a session that has not started.
-            bool canTrade = !_lockout && inWindow && inRth && warm;
+            // ATM mode with a broken template or outside realtime takes NO trades and
+            // never falls back to the managed path — the user chose ATM deliberately.
+            // Folded into canTrade so the engine stays silent rather than arming
+            // patterns it cannot act on. (AtmStrategyCreate is ignored on historical
+            // data, which is the whole Strategy Analyzer.)
+            bool atmUnusable = UseAtmStrategy && (_atmBlocked || State != State.Realtime);
+            if (atmUnusable && !_atmUnusableWarned)
+            {
+                _atmUnusableWarned = true;
+                Log(Name + ": ATM mode takes no trades here — " + (_atmBlocked
+                        ? "the template is missing or unset."
+                        : "ATM strategies only run in realtime/Playback, never on historical data (Strategy Analyzer)."),
+                    Cbi.LogLevel.Warning);
+            }
+            bool canTrade = !_lockout && inWindow && inRth && warm && !atmUnusable;
             List<PzAction> actions = _engine.OnBarClosed(bar, _atr.Value, canTrade);
 
             foreach (PzAction a in actions)
@@ -537,8 +605,134 @@ namespace NinjaTrader.NinjaScript.Strategies
             return n != null && n.StartsWith("PZ_ADD", StringComparison.Ordinal);
         }
 
+        // Where NT8 keeps ATM strategy templates — the dropdown reads this folder.
+        internal static string AtmTemplateDir
+        {
+            get { return Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "templates", "AtmStrategy"); }
+        }
+
+        // --- ATM mode (Amendment 5) -----------------------------------------
+        // The template owns the trade once created, so this path submits the entry
+        // and then only WATCHES. Same race discipline as the managed path: every id
+        // and flag is written BEFORE AtmStrategyCreate, because the callback runs on
+        // the UI thread and can land before the call returns.
+        private void SubmitAtmEntry(PzAction a)
+        {
+            if (_atmBlocked || State != State.Realtime || _atmId.Length > 0)
+            {
+                Print(Name + ": ATM entry refused — blocked config, not realtime, or one is already live.");
+                _engine.OnEntryFailed();
+                return;
+            }
+
+            string id = GetAtmStrategyUniqueId();
+            string orderId = GetAtmStrategyUniqueId();
+            _atmId = id;                                   // all BEFORE the create
+            _atmOrderId = orderId;
+            _atmPending = true;
+            _atmInPosition = false;
+
+            AtmStrategyCreate(
+                a.Type == PzActionType.EnterLong ? OrderAction.Buy : OrderAction.SellShort,
+                OrderType.Market, 0, 0, TimeInForce.Day,
+                orderId, AtmTemplateName.Trim(), id,
+                (errorCode, callbackId) =>
+                {
+                    if (callbackId != id)                  // id-gated, like every clear in this file
+                        return;
+                    if (errorCode == ErrorCode.NoError)
+                        return;
+                    Print(Name + ": ATM create FAILED (" + errorCode + ") — releasing the gate.");
+                    ClearAtm();
+                    _engine.OnEntryFailed();
+                });
+
+            Print(string.Format(CultureInfo.InvariantCulture,
+                "{0} {1:yyyy-MM-dd HH:mm} ATM ENTRY {2} template={3} atmId={4}",
+                Name, Time[0], a.Pattern.Kind, AtmTemplateName.Trim(), id));
+        }
+
+        // An ATM position is invisible to Position and fires none of our handlers,
+        // so the engine's state machine is driven from here, once per closed bar.
+        // Every getter is wrapped: they throw once the id is no longer known to NT8.
+        private void PollAtm()
+        {
+            if (_atmId.Length == 0 || State != State.Realtime)
+                return;
+
+            if (_atmPending)
+            {
+                string[] st = null;
+                try { st = GetAtmStrategyEntryOrderStatus(_atmOrderId); } catch { }
+                if (st != null && st.Length > 2)
+                {
+                    if (st[2] == "Filled")
+                    {
+                        _atmPending = false;
+                        _atmInPosition = true;
+                        double fill;
+                        double.TryParse(st[0], NumberStyles.Any, CultureInfo.InvariantCulture, out fill);
+                        Print(Name + ": ATM entry filled at " + fill.ToString("0.##", CultureInfo.InvariantCulture));
+                        _engine.OnEntryFilled(fill);
+                    }
+                    else if (st[2] == "Cancelled" || st[2] == "Rejected")
+                    {
+                        Print(Name + ": ATM entry " + st[2] + " unfilled — back to flat.");
+                        ClearAtm();
+                        _engine.OnEntryFailed();
+                        return;
+                    }
+                }
+            }
+
+            if (!_atmInPosition)
+                return;
+
+            MarketPosition mp = MarketPosition.Flat;
+            try { mp = GetAtmStrategyMarketPosition(_atmId); } catch { }
+            if (mp != MarketPosition.Flat)
+                return;
+
+            // The template closed the trade (its target, its stop, or a hand exit).
+            // SystemPerformance never sees ATM trades, so the daily-loss guard is
+            // fed here or not at all.
+            double pnl = 0;
+            try { pnl = GetAtmStrategyRealizedProfitLoss(_atmId); } catch { }
+            _atmDayRealized += pnl;
+            Print(string.Format(CultureInfo.InvariantCulture,
+                "{0} ATM trade closed, realized {1:0.##} USD | session ATM total {2:0.##}",
+                Name, pnl, _atmDayRealized));
+            ClearAtm();
+            _engine.OnPositionClosed();
+            CheckDailyLoss();
+        }
+
+        private void ClearAtm()
+        {
+            _atmId = string.Empty;
+            _atmOrderId = string.Empty;
+            _atmPending = false;
+            _atmInPosition = false;
+        }
+
+        // The strategy-level risk rules still bind in ATM mode. AtmStrategyClose
+        // flattens the position AND cancels the template's own stop/target; called
+        // every bar until the poll above sees flat, same retry shape as FlattenNow.
+        private void CloseAtm(string why)
+        {
+            if (_atmId.Length == 0 || State != State.Realtime)
+                return;
+            Print(Name + ": closing ATM (" + why + ").");
+            try { AtmStrategyClose(_atmId); } catch { }
+        }
+
         private void SubmitEntry(PzAction a)
         {
+            if (UseAtmStrategy)
+            {
+                SubmitAtmEntry(a);
+                return;
+            }
             // The engine has ALREADY moved to AwaitingEntryFill by emitting this
             // action. Refusing without telling it would strand it there for the
             // rest of the run, so every refusal path below reports the failure.
@@ -716,7 +910,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (_lockout || DailyLossLimitUsd <= 0)
                 return;
-            double realized = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - _dayStartCum;
+            // SystemPerformance never books an ATM trade, so the ATM total is added
+            // in. In managed mode it is 0; in ATM mode the SystemPerformance term is.
+            double realized = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit - _dayStartCum
+                + _atmDayRealized;
             if (realized <= -DailyLossLimitUsd)
                 Lockout("daily loss " + realized.ToString("0", CultureInfo.InvariantCulture) + " USD");
         }
@@ -1264,8 +1461,43 @@ namespace NinjaTrader.NinjaScript.Strategies
         public int PatternLineWidth { get; set; }
 
         [NinjaScriptProperty]
+        [Display(Name = "Use ATM strategy", Description = "Route entries through an NT8 ATM strategy template instead of the built-in bracket. The template then OWNS the trade: it supplies the stop and target, the stop offset/buffer and target multiple are ignored, and the flag add-on is disabled. Realtime/Playback only — the Strategy Analyzer ignores ATM strategies.", GroupName = "07. ATM", Order = 0)]
+        public bool UseAtmStrategy { get; set; }
+
+        [NinjaScriptProperty]
+        [TypeConverter(typeof(AtmTemplateNameConverter))]
+        [Display(Name = "ATM template", Description = "One of the ATM strategy templates saved on this machine (the same list Chart Trader shows). Required when ATM mode is on — an unknown name blocks trading rather than silently falling back.", GroupName = "07. ATM", Order = 1)]
+        public string AtmTemplateName { get; set; }
+
+        [NinjaScriptProperty]
         [Display(Name = "Draw rejected patterns", Description = "Diagnostic: draw the patterns the permission gauntlet refused, with the reason. Noisy — off for real runs.", GroupName = "06. Drawing", Order = 7)]
         public bool DrawRejectedPatterns { get; set; }
         #endregion
+    }
+
+    // Amendment 5: fills the "ATM template" dropdown from the templates saved on
+    // THIS machine, the same folder Chart Trader's ATM selector reads.
+    // ponytail: enumerating the folder is the whole implementation — NT8 exposes no
+    // public template-name API in the documented surface. Not exclusive, so a name
+    // can still be typed for a template created after the dialog opened.
+    public class AtmTemplateNameConverter : TypeConverter
+    {
+        public override bool GetStandardValuesSupported(ITypeDescriptorContext context) { return true; }
+        public override bool GetStandardValuesExclusive(ITypeDescriptorContext context) { return false; }
+
+        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
+        {
+            var names = new List<string>();
+            try
+            {
+                string dir = PatternZoneStrategy.AtmTemplateDir;
+                if (Directory.Exists(dir))
+                    foreach (string f in Directory.GetFiles(dir, "*.xml"))
+                        names.Add(Path.GetFileNameWithoutExtension(f));
+            }
+            catch { }                                  // an unreadable folder = empty list, never a crashed dialog
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            return new StandardValuesCollection(names);
+        }
     }
 }

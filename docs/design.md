@@ -299,3 +299,34 @@ meaningless for a tick/volume/range bar.
     different per chart. The validated baseline stays 1 Minute, and **each
     bar-type variant is its own strategy for evidence purposes** — see
     `docs/validation.md`.
+
+**Amendment 5 — 2026-08-12 (pre-P&L). Shell only — the core is untouched.**
+Javier wants the option of handing a trade to one of his own NT8 ATM strategy
+templates once PatternZone has found the entry.
+
+11. **ATM mode.** `UseAtmStrategy` (default **false**) and `AtmTemplateName`
+    (a dropdown of the ATM templates saved on this machine — the folder Chart
+    Trader reads). With it **off, nothing changes**: the managed path is
+    byte-identical, which is what makes this a strict superset.
+    With it on, an entry is submitted via `AtmStrategyCreate` (market) and **the
+    template owns the trade from that moment**. It supplies the stop and target,
+    so `StopOffsetTicks`, `StopBufferAtr` and `TargetMultiple` are ignored, and
+    the **flag add-on is disabled** — the shell hands the engine a config with
+    `EnableFlagAddon = false`, so no add is ever emitted (the core has no idea
+    ATM exists). One line at startup lists exactly what the template overrides.
+12. **The engine is driven by polling in ATM mode.** An ATM position is
+    invisible to `Position` and fires none of our order handlers, so each closed
+    bar checks `GetAtmStrategyEntryOrderStatus` and `GetAtmStrategyMarketPosition`
+    and calls `OnEntryFilled` / `OnEntryFailed` / `OnPositionClosed` itself. One
+    ATM at a time; flat-to-flat is preserved because a live `atmId` is refused by
+    the entry guard.
+13. **Strategy-level risk still binds.** The trading-window flatten and the
+    daily-loss lockout both call `AtmStrategyClose`, retried each bar until the
+    poll sees flat. `SystemPerformance` never books an ATM trade, so each closed
+    ATM's `GetAtmStrategyRealizedProfitLoss` is accumulated into the session
+    total that the daily-loss guard reads.
+14. **Two refusals, both loud, neither silent.** An empty or missing template
+    blocks trading outright rather than falling back to the managed path — the
+    user chose ATM deliberately. And `AtmStrategyCreate` is ignored on historical
+    data, so in the Strategy Analyzer (and any non-realtime state) ATM mode takes
+    **no trades at all** and says so once.
