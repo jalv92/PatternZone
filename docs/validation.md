@@ -30,11 +30,12 @@ detector that draws the wrong patterns.
 ---
 
 > **A run that takes no trades tells you why in the Output window.** Every state
-> that stops trading names itself once, in **Output** as well as the Log tab: a
-> blocked or missing ATM template, ATM mode outside realtime, account-wide
-> outside realtime, a daily-limit lockout, and the three quiet gates — outside
-> RTH, outside the trading window, and the ATR warmup. **A session with zero
-> lines in BOTH Log and Output cannot happen.** Zero ENTRY lines with a
+> that stops trading names itself once per session, in **Output** as well as the
+> Log tab: a blocked or missing ATM template, ATM mode outside realtime,
+> account-wide outside realtime, a daily-limit lockout, and the two quiet gates —
+> outside RTH and outside the trading window. One accepted exception: a session
+> that never completes the 15-bar ATR warmup says nothing, because it has nothing
+> to say. Zero ENTRY lines with a
 > "no trades this bar and every bar like it" line means exactly what it says;
 > zero ENTRY lines with no such line means the engine ran and found no qualifying
 > pattern — turn on `DrawRejectedPatterns` to see what it refused and why.

@@ -549,6 +549,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     _curRthDate = barStart.Date;
                     _lockout = false;                      // the daily lockout lasts until the next session
+                    _noTradeWarned = false;                // one reason per SESSION: on an ETH chart the first
+                                                           // warm bar is overnight, and "outside RTH" would
+                                                           // otherwise spend the only line before the window opens
                     // Baseline for the realized daily loss. Snapshotted here and
                     // nowhere else, so the limit measures THIS session.
                     _dayStartCum = SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit;
