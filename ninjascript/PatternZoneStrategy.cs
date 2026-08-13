@@ -311,11 +311,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                     string tpl = (AtmTemplateName ?? string.Empty).Trim();
                     _atmBlocked = tpl.Length == 0 || !File.Exists(Path.Combine(AtmTemplateDir, tpl + ".xml"));
                     if (_atmBlocked)
-                        Log(Name + ": ATM mode is ON but the template \"" + tpl + "\" is empty or not found in "
-                            + AtmTemplateDir + " — NO trading. Pick a template from the dropdown (it lists the ATM templates saved on this machine).",
+                        Announce("ATM mode is ON but the template \"" + tpl + "\" is empty or not found in "
+                            + AtmTemplateDir + " — NO trading, for the whole run. Pick a template from the dropdown (it lists the ATM templates saved on this machine), or untick Use ATM strategy.",
                             Cbi.LogLevel.Error);
                     else
-                        Log(Name + ": ATM mode ON, template \"" + tpl + "\". The template now OWNS the trade after entry — it supplies the stop, the target AND the position size, so Stop offset, Stop buffer, Target multiple and Contracts are all ignored, and the flag add-on is DISABLED. PatternZone still decides the entry, the trading window flatten and the daily-loss lockout.",
+                        Announce("ATM mode ON, template \"" + tpl + "\". The template now OWNS the trade after entry — it supplies the stop, the target AND the position size, so Stop offset, Stop buffer, Target multiple and Contracts are all ignored, and the flag add-on is DISABLED. PatternZone still decides the entry, the trading window flatten and the daily-limit lockout.",
                             Cbi.LogLevel.Information);
                 }
 
@@ -331,6 +331,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // contributors rather than one silently overwriting the other.
                 _govKey = Instrument.FullName + "/" + Guid.NewGuid().ToString("N").Substring(0, 4);
                 _govAccount = Account != null ? Account.Name : null;
+                // Bug 2026-08-12. The record is keyed (account, TAPE day) and its breach
+                // outlives a re-enable BY DESIGN — live, a daily limit you can clear with
+                // a checkbox is not a limit. But in Playback the tape day comes round
+                // again on every replay, so a fresh application would inherit the last
+                // run's breach and refuse to trade the whole day. Clear it here, and only
+                // here: a Playback connection, and only when no live contributor is left,
+                // so two Playback charts still share one governor. Provider.Playback is
+                // the house test (RadarChartTrader.cs:1412).
+                if (AccountWide && Account != null && Account.Provider == Provider.Playback
+                    && PatternZoneShell.DailyGovernor.ForgetIfIdle(_govAccount))
+                    Announce("Playback: cleared a previous run's account-wide daily-limit record, so this replay starts unlocked.",
+                        Cbi.LogLevel.Information);
                 if (AccountWide)
                     Log(Name + ": account-wide daily limits are ON — the limits are measured against the SUM of every PATTERNZONE instance on this account, and a breach on any one of them flattens and locks out all of them. It does NOT include other strategies (LatigoBreak, TBStrategy) or manual trades: the sum is built from these instances' own numbers, never from the account's aggregates.",
                         Cbi.LogLevel.Information);
@@ -424,6 +436,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             _drawTags.Add(t);
             return t;
+        }
+
+        // A reason the strategy WILL NOT TRADE goes to both the Log tab and the Output
+        // window. Output is where the ENTRY lines land, so it is the only place the user
+        // is actually watching; a run that declines to trade all day has to say why
+        // THERE or it reads as a dead strategy. (Bug 2026-08-12: a whole silent Playback
+        // day — the explanation was sitting in the Log tab the entire time.)
+        private void Announce(string msg, Cbi.LogLevel level)
+        {
+            Log(Name + ": " + msg, level);
+            Print(Name + ": " + msg);
         }
 
         private static int HhmmToSecs(int hhmm)
@@ -608,7 +631,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (atmUnusable && !_atmUnusableWarned)
             {
                 _atmUnusableWarned = true;
-                Log(Name + ": ATM mode takes no trades here — " + (_atmBlocked
+                Announce("ATM mode takes no trades here — " + (_atmBlocked
                         ? "the template is missing or unset."
                         : "ATM strategies never run on historical data. On a live chart this is just the warmup over loaded bars and trading starts when it reaches realtime; in the Strategy Analyzer it means the whole run."),
                     Cbi.LogLevel.Warning);
@@ -622,7 +645,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (AccountWide && State != State.Realtime && !_acctWideWarned)
             {
                 _acctWideWarned = true;
-                Log(Name + ": account-wide daily limits are ON outside realtime. On a live chart this is just the warmup over loaded bars and the shared governor starts meaning something when the chart reaches realtime. In the Strategy Analyzer the account is virtual and shared by every iteration of the run, so an optimization pools unrelated iterations into one governor — leave account-wide OFF for backtests.",
+                Announce("account-wide daily limits are ON outside realtime. On a live chart this is just the warmup over loaded bars and the shared governor starts meaning something when the chart reaches realtime. In the Strategy Analyzer the account is virtual and shared by every iteration of the run, so an optimization pools unrelated iterations into one governor — leave account-wide OFF for backtests.",
                     Cbi.LogLevel.Warning);
             }
             bool canTrade = !_lockout && inWindow && inRth && warm && !atmUnusable;
@@ -1762,6 +1785,13 @@ namespace PatternZoneShell
                     _pnl.Remove(key);
             }
 
+            // No contributors left = every instance that published has since dropped its
+            // key at Terminated, so nothing living is using this record.
+            public bool IsIdle
+            {
+                get { lock (_pnl) return _pnl.Count == 0; }
+            }
+
             // "MNQ 09-26/4f2a -412.50; ES 09-26/9c01 120.00; " — which instrument put
             // the group where it is. Only ever built on the bar a limit actually trips.
             public string Breakdown()
@@ -1815,6 +1845,22 @@ namespace PatternZoneShell
         // `_govKey`'s last published P&L frozen in the record while the reloaded
         // instance publishes under a FRESH key — the group would double-count a phantom
         // and lock everyone out (or trip the profit target) on P&L that no longer exists.
+        // Drop an account's record only if nothing living is using it. Playback's cure
+        // for a stale breach: the tape day repeats on every replay, so a fresh run would
+        // otherwise inherit the previous run's lockout. Idle-only, so two Playback charts
+        // sharing a governor keep it. Returns true if a record was actually dropped.
+        public static bool ForgetIfIdle(string account)
+        {
+            lock (Accounts)
+            {
+                AccountDay g;
+                if (!Accounts.TryGetValue(account, out g) || !g.IsIdle)
+                    return false;
+                Accounts.Remove(account);
+                return true;
+            }
+        }
+
         public static void Drop(string account, string key)
         {
             lock (Accounts)
